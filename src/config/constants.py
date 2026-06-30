@@ -1,5 +1,13 @@
-"""Application-wide constants.
+"""Application-wide constants for the VDR Assistant MVP 2."""
 
-This module should contain supported modes, fallback messages,
-default questions, and other fixed values used across the app.
-"""
+APP_TITLE = "VDR Assistant MVP 2"
+
+FALLBACK_ANSWER = "I can not find this information in the VDR documents"
+
+SUPPORTED_MODES = {
+    "qa": "Q&A",
+    "compare": "Compare",
+    "summarize": "Summarize",
+}
+
+DEFAULT_MODE = "qa"
