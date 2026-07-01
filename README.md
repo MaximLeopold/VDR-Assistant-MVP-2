@@ -1,3 +1,7 @@
+# General Description
+
+A reference implementation of a modular VDR RAG assistant using the OpenAI Responses API, File Search, and workflow-based architecture.
+
 # VDR-Assistant-MVP-2
 
 Improved local-first VDR RAG assistant for M&A due diligence.
