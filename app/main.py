@@ -1,6 +1,16 @@
 """Streamlit entry point for the VDR Assistant."""
 
+from pathlib import Path
+import sys
+
 import streamlit as st
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 
 from src.chains.qa_chain import run_qa_chain
 from src.config.constants import APP_TITLE
@@ -50,13 +60,12 @@ if blocking_missing_settings:
 
 mode, active_vector_store = render_sidebar(VECTOR_STORE_ID)
 
-render_source_panel(st.session_state.last_answer)
-
 if not active_vector_store:
     st.warning(
         "Please enter an OpenAI vector store ID in the sidebar "
         "or add VECTOR_STORE_ID to your local .env file."
     )
+    render_source_panel(st.session_state.last_answer)
     st.stop()
 
 
@@ -65,6 +74,7 @@ if mode != "qa":
         "Only the Q&A workflow is implemented in this version. "
         "Compare and Summarize will be added later."
     )
+    render_source_panel(st.session_state.last_answer)
     st.stop()
 
 
@@ -99,3 +109,6 @@ if question:
     st.session_state.last_answer = answer
 
     render_answer(answer)
+
+
+render_source_panel(st.session_state.last_answer)
