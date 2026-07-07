@@ -58,7 +58,13 @@ if blocking_missing_settings:
     st.stop()
 
 
-mode, active_vector_store = render_sidebar(VECTOR_STORE_ID)
+mode, active_vector_store, reset_chat = render_sidebar(VECTOR_STORE_ID)
+
+if reset_chat:
+    st.session_state.messages = []
+    st.session_state.last_answer = None
+    st.rerun()
+
 
 if not active_vector_store:
     st.warning(

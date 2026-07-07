@@ -1,9 +1,3 @@
-"""Q&A chain for standard VDR question answering.
-
-This chain uses the OpenAI File Search retrieval wrapper and validates
-that each answer is supported by citations.
-"""
-
 """Q&A workflow for the VDR Assistant.
 
 This module orchestrates the full Q&A flow:
@@ -18,6 +12,7 @@ This module orchestrates the full Q&A flow:
 
 from pathlib import Path
 
+from src.config.constants import FALLBACK_ANSWER
 from src.context.conversation_context import build_conversation_context
 from src.retrieval.openai_file_search import search_vector_store
 from src.retrieval.citation_extractor import extract_response_data
@@ -25,7 +20,7 @@ from src.schemas.answer import VDRAnswer
 from src.validation.answer_validator import validate_answer
 
 
-PROMPT_PATH = Path("src/prompts/qa.md")
+PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "qa.md"
 
 
 def load_qa_prompt() -> str:
@@ -68,21 +63,35 @@ def run_qa_chain(
         conversation_context=conversation_context,
     )
 
-    instructions = load_qa_prompt()
+    try:
+        instructions = load_qa_prompt()
 
-    raw_response = search_vector_store(
-        question=qa_input,
-        vector_store_id=vector_store_id,
-        instructions=instructions,
-    )
+        raw_response = search_vector_store(
+            question=qa_input,
+            vector_store_id=vector_store_id,
+            instructions=instructions,
+        )
 
-    extracted = extract_response_data(raw_response)
+        extracted = extract_response_data(raw_response)
 
-    validated_answer = validate_answer(
-        answer=extracted["answer"],
-        source_files=extracted["source_files"],
-        quotes=extracted["quotes"],
-        workflow="qa",
-    )
+        validated_answer = validate_answer(
+            answer=extracted["answer"],
+            source_files=extracted["source_files"],
+            quotes=extracted["quotes"],
+            workflow="qa",
+        )
 
-    return validated_answer
+        return validated_answer
+
+    except Exception as error:
+        return VDRAnswer(
+            answer=FALLBACK_ANSWER,
+            source_files=[],
+            quotes=[],
+            warnings=[
+                "The Q&A workflow failed while searching the VDR.",
+                str(error),
+            ],
+            status="error",
+            workflow="qa",
+        )

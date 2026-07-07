@@ -1,9 +1,3 @@
-"""Sidebar UI components.
-
-This module should render the vector store ID input, mode selector,
-standard due diligence questions, and reset controls.
-"""
-
 """Sidebar UI components for the VDR Assistant."""
 
 import streamlit as st
@@ -11,13 +5,14 @@ import streamlit as st
 from src.config.constants import SUPPORTED_MODES
 
 
-def render_sidebar(default_vector_store_id: str | None) -> tuple[str, str]:
+def render_sidebar(default_vector_store_id: str | None) -> tuple[str, str, bool]:
     """Render sidebar controls.
 
     Returns:
         A tuple containing:
         - selected workflow mode
         - active vector store ID
+        - whether the user clicked reset chat
     """
 
     st.sidebar.header("VDR Settings")
@@ -41,4 +36,11 @@ def render_sidebar(default_vector_store_id: str | None) -> tuple[str, str]:
     else:
         st.sidebar.error("Vector store ID missing.")
 
-    return mode, vector_store_id
+    st.sidebar.divider()
+
+    reset_chat = st.sidebar.button(
+        "Reset chat",
+        help="Clear the current conversation history.",
+    )
+
+    return mode, vector_store_id, reset_chat

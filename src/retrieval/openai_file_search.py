@@ -1,8 +1,3 @@
-"""OpenAI File Search retrieval wrapper.
-
-This module should contain the Responses API call that searches the
-active OpenAI vector store and returns the raw OpenAI response.
-"""
 """OpenAI File Search service.
 
 This module is responsible for communicating with the OpenAI
@@ -20,7 +15,10 @@ from src.config.settings import (
 )
 
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+def get_openai_client() -> OpenAI:
+    """Create and return an OpenAI client."""
+
+    return OpenAI(api_key=OPENAI_API_KEY)
 
 
 def search_vector_store(
@@ -48,6 +46,8 @@ def search_vector_store(
         Parsing the response is the responsibility of
         citation_extractor.py.
     """
+
+    client = get_openai_client()
 
     response = client.responses.create(
         model=OPENAI_MODEL,
