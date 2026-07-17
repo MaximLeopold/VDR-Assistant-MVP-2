@@ -39,27 +39,27 @@ def build_manifest(folder_path: str) -> VDRManifest:
                 filename=file["filename"],
                 extension=file["extension"],
                 size_bytes=file["size_bytes"],
-                status=file["status"],
-                reason=file["reason"],
+                classification_status=file["classification_status"],
+                classification_reason=file["classification_reason"],
             )
         )
 
     supported_files = [
         file
         for file in file_records
-        if file.status == "supported"
+        if file.classification_status == "supported"
     ]
 
     unsupported_files = [
         file
         for file in file_records
-        if file.status == "unsupported"
+        if file.classification_status == "unsupported"
     ]
 
     ignored_files = [
         file
         for file in file_records
-        if file.status == "ignored"
+        if file.classification_status == "ignored"
     ]
 
     return VDRManifest(

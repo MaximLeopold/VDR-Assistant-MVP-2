@@ -48,7 +48,9 @@ def main() -> None:
     for file in manifest.files:
 
         print(
-            f"[{file.status.upper():11}] "
+            f"[classification={file.classification_status:11}] "
+            f"[upload={file.upload_status:12}] "
+            f"[indexing={file.indexing_status:11}] "
             f"{file.relative_path}"
         )
 

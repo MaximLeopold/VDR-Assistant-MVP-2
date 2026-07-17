@@ -18,6 +18,8 @@ path as source!
 WE HAVE TO ADDRESS THE WEAKNESS THAT THE MANIFEST ONLY EXISTS IN THE PYTHON MEMORY AND ONCE THE SCRIPT STOPS IT DISSAPEARS!
 """
 
+from typing import Literal
+
 from pydantic import BaseModel
 
 
@@ -31,11 +33,33 @@ class VDRFileRecord(BaseModel):
     extension: str
     size_bytes: int
 
-    status: str
-    reason: str
+    checksum_sha256: str | None = None
+
+    classification_status: Literal[
+        "supported",
+        "unsupported",
+        "ignored",
+        "error",
+    ]
+    classification_reason: str
 
     openai_file_id: str | None = None
-    upload_status: str = "not_uploaded"
+    upload_status: Literal[
+        "not_uploaded",
+        "uploading",
+        "uploaded",
+        "failed",
+    ] = "not_uploaded"
+
+    indexing_status: Literal[
+        "not_started",
+        "in_progress",
+        "completed",
+        "failed",
+    ] = "not_started"
+
+    upload_attempts: int = 0
+    last_error: str | None = None
 
 
 class VDRManifest(BaseModel):

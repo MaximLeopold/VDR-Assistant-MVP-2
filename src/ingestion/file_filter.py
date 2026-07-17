@@ -70,27 +70,29 @@ def classify_file(file_record: dict) -> dict:
     size_bytes = classified["size_bytes"]
 
     if filename in IGNORED_FILENAMES:
-        classified["status"] = "ignored"
-        classified["reason"] = "Ignored system file"
+        classified["classification_status"] = "ignored"
+        classified["classification_reason"] = "Ignored system file"
         return classified
 
     if filename.startswith(IGNORED_PREFIXES):
-        classified["status"] = "ignored"
-        classified["reason"] = "Ignored temporary Office file"
+        classified["classification_status"] = "ignored"
+        classified["classification_reason"] = "Ignored temporary Office file"
         return classified
 
     if size_bytes == 0:
-        classified["status"] = "ignored"
-        classified["reason"] = "Empty file"
+        classified["classification_status"] = "ignored"
+        classified["classification_reason"] = "Empty file"
         return classified
 
     if extension not in SUPPORTED_EXTENSIONS:
-        classified["status"] = "unsupported"
-        classified["reason"] = f"Unsupported file extension: {extension}"
+        classified["classification_status"] = "unsupported"
+        classified["classification_reason"] = (
+            f"Unsupported file extension: {extension}"
+        )
         return classified
 
-    classified["status"] = "supported"
-    classified["reason"] = "Supported file type"
+    classified["classification_status"] = "supported"
+    classified["classification_reason"] = "Supported file type"
     return classified
 
 
