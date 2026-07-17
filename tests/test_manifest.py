@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from src.ingestion.file_filter import classify_file
-from src.ingestion.manifest import VDRFileRecord
+from src.ingestion.manifest import VDRFileRecord, VDRManifest
 from src.ingestion.manifest_builder import build_manifest
 
 
@@ -80,6 +80,18 @@ def test_file_record_rejects_invalid_status(
         VDRFileRecord(**values)
 
 
+def test_manifest_rejects_unsupported_schema_version(tmp_path: Path) -> None:
+    manifest = build_manifest(str(tmp_path))
+
+    assert manifest.schema_version == 1
+
+    values = manifest.model_dump()
+    values["schema_version"] = 2
+
+    with pytest.raises(ValidationError):
+        VDRManifest.model_validate(values)
+
+
 def test_build_manifest_counts_classifications_and_preserves_nested_path(
     tmp_path: Path,
 ) -> None:
@@ -95,6 +107,19 @@ def test_build_manifest_counts_classifications_and_preserves_nested_path(
     assert manifest.supported_files == 1
     assert manifest.unsupported_files == 1
     assert manifest.ignored_files == 1
+    assert manifest.error_files == 0
+    assert (
+        manifest.supported_files
+        + manifest.unsupported_files
+        + manifest.ignored_files
+        + manifest.error_files
+        == manifest.total_files
+    )
+    assert manifest.case_name == tmp_path.parent.name
+    assert manifest.root_path == str(tmp_path.resolve())
+    assert manifest.vector_store_id is None
+    assert manifest.created_at == manifest.updated_at
+    assert manifest.created_at.tzinfo is not None
 
     supported_file = next(
         file
@@ -102,3 +127,38 @@ def test_build_manifest_counts_classifications_and_preserves_nested_path(
         if file.classification_status == "supported"
     )
     assert supported_file.relative_path == "Legal/Contracts/agreement.pdf"
+
+
+def test_builder_counts_error_classifications(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scanned_file = {
+        "absolute_path": str(tmp_path / "broken.pdf"),
+        "relative_path": "broken.pdf",
+        "filename": "broken.pdf",
+        "extension": ".pdf",
+        "size_bytes": 10,
+    }
+    classified_file = {
+        **scanned_file,
+        "classification_status": "error",
+        "classification_reason": "Classification failed",
+    }
+
+    monkeypatch.setattr(
+        "src.ingestion.manifest_builder.scan_vdr_folder",
+        lambda folder_path: [scanned_file],
+    )
+    monkeypatch.setattr(
+        "src.ingestion.manifest_builder.classify_files",
+        lambda files: [classified_file],
+    )
+
+    manifest = build_manifest(str(tmp_path))
+
+    assert manifest.total_files == 1
+    assert manifest.error_files == 1
+    assert manifest.supported_files == 0
+    assert manifest.unsupported_files == 0
+    assert manifest.ignored_files == 0

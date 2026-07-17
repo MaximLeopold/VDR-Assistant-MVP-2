@@ -18,6 +18,7 @@ path as source!
 WE HAVE TO ADDRESS THE WEAKNESS THAT THE MANIFEST ONLY EXISTS IN THE PYTHON MEMORY AND ONCE THE SCRIPT STOPS IT DISSAPEARS!
 """
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel
@@ -26,7 +27,7 @@ from pydantic import BaseModel
 class VDRFileRecord(BaseModel):
     """Structured record for one file in a VDR folder."""
 
-    absolute_path: str
+    absolute_path: str | None = None
     relative_path: str
 
     filename: str
@@ -65,11 +66,18 @@ class VDRFileRecord(BaseModel):
 class VDRManifest(BaseModel):
     """Structured manifest representing one scanned VDR."""
 
-    root_path: str
+    schema_version: Literal[1] = 1
+    case_name: str
+    root_path: str | None = None
+    vector_store_id: str | None = None
+
+    created_at: datetime
+    updated_at: datetime
 
     total_files: int
     supported_files: int
     unsupported_files: int
     ignored_files: int
+    error_files: int
 
     files: list[VDRFileRecord]
