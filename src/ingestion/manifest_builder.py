@@ -6,6 +6,8 @@ structured VDRManifest object.
 It does not upload files.
 It does not modify files.
 It only prepares a structured manifest.
+
+This module coordinates the folder scanner, file filter, and manifest modules to produce a structured manifest for a local VDR folder.
 """
 
 from pathlib import Path

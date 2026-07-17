@@ -20,6 +20,10 @@ for every file found recursively.
 It does not upload files.
 It does not modify files.
 It only reads folder structure and file metadata.
+
+This module informs python where the VDR files are located on the laptop/local VDR folder.
+It is required for uploading the files
+This is the first step of the ingestion pipeline - it is followed by file classification and manifest building.
 """
 
 from pathlib import Path

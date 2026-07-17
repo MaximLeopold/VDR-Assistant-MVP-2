@@ -10,6 +10,12 @@ inside one VDR project.
 
 Upload-related fields are included but remain empty until the upload
 step is implemented.
+
+The manifest acts as invetory for the VDR - when OpenAI cites  a file the streamlit application
+looks in the manifest to find the path of the file - this is how we can give the local VDR file
+path as source! 
+
+WE HAVE TO ADDRESS THE WEAKNESS THAT THE MANIFEST ONLY EXISTS IN THE PYTHON MEMORY AND ONCE THE SCRIPT STOPS IT DISSAPEARS!
 """
 
 from pydantic import BaseModel

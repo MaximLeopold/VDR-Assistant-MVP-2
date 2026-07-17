@@ -25,7 +25,8 @@ Excel support will be added in a later version.
 
 """File filtering for VDR ingestion.
 
-This module classifies scanned files before upload.
+This module classifies scanned files before upload - it functions after the folder scanner and before the upload step.
+It basically receives the file records from the folder_scanner and classifies them as supported, unsupported or ignored.
 
 It does not upload files.
 It only determines whether files should be included, ignored,
