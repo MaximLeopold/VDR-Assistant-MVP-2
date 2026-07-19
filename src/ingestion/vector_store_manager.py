@@ -18,7 +18,9 @@ from openai import (
     RateLimitError,
 )
 from openai import NotFoundError as OpenAINotFoundError
+from openai.types.file_object import FileObject
 from openai.types.vector_store import VectorStore
+from openai.types.vector_stores.vector_store_file import VectorStoreFile
 
 
 class VectorStoreError(Exception):
@@ -63,6 +65,14 @@ class VectorStoreIdMismatchError(VectorStoreError):
 
 class InvalidCaseNameError(VectorStoreError):
     """Raised when a vector store cannot be named from the case."""
+
+
+class InvalidOpenAIFileIdError(VectorStoreError):
+    """Raised when an OpenAI file ID is blank or invalid."""
+
+
+class OpenAIFileIdMismatchError(VectorStoreError):
+    """Raised when file retrieval returns a different OpenAI file ID."""
 
 
 class VectorStoreCreationError(VectorStoreError):
@@ -185,3 +195,45 @@ def create_vector_store(
         ) from error
 
     return vector_store
+
+
+def list_vector_store_files(
+    client: OpenAI,
+    vector_store_id: str,
+) -> list[VectorStoreFile]:
+    """Return every file attachment associated with a vector store."""
+
+    requested_id = normalize_vector_store_id(vector_store_id)
+
+    try:
+        page = client.vector_stores.files.list(requested_id)
+        return list(page)
+    except Exception as error:
+        _raise_retrieval_error(error)
+        raise  # pragma: no cover - _raise_retrieval_error always raises
+
+
+def retrieve_openai_file(
+    client: OpenAI,
+    file_id: str,
+) -> FileObject:
+    """Retrieve and validate one underlying OpenAI File object."""
+
+    if not isinstance(file_id, str) or not file_id.strip():
+        raise InvalidOpenAIFileIdError(
+            "The OpenAI file ID must not be blank."
+        )
+    requested_id = file_id.strip()
+
+    try:
+        openai_file = client.files.retrieve(requested_id)
+    except Exception as error:
+        _raise_retrieval_error(error)
+        raise  # pragma: no cover - _raise_retrieval_error always raises
+
+    if getattr(openai_file, "id", None) != requested_id:
+        raise OpenAIFileIdMismatchError(
+            "OpenAI returned a file whose ID did not match the requested ID."
+        )
+
+    return openai_file

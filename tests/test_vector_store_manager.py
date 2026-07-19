@@ -7,7 +7,9 @@ import pytest
 
 from src.ingestion.vector_store_manager import (
     InvalidCaseNameError,
+    InvalidOpenAIFileIdError,
     InvalidVectorStoreIdError,
+    OpenAIFileIdMismatchError,
     VectorStoreAPIError,
     VectorStoreAuthenticationError,
     VectorStoreConnectionError,
@@ -18,6 +20,8 @@ from src.ingestion.vector_store_manager import (
     VectorStoreRateLimitError,
     VectorStoreTimeoutError,
     create_vector_store,
+    list_vector_store_files,
+    retrieve_openai_file,
     retrieve_vector_store,
 )
 
@@ -142,3 +146,60 @@ def test_creation_rejects_response_without_id() -> None:
 
     with pytest.raises(VectorStoreCreationError):
         create_vector_store(client, "Project Falcon")
+
+
+def test_blank_vector_store_id_rejected_before_file_list() -> None:
+    client = make_client()
+
+    with pytest.raises(InvalidVectorStoreIdError):
+        list_vector_store_files(client, "  ")
+
+    client.vector_stores.files.list.assert_not_called()
+
+
+def test_list_vector_store_files_uses_id_and_returns_all_pages() -> None:
+    client = make_client()
+    first = SimpleNamespace(id="file_first")
+    second = SimpleNamespace(id="file_second")
+
+    class PaginatedAttachments:
+        def __iter__(self):
+            yield first
+            yield second
+
+    client.vector_stores.files.list.return_value = PaginatedAttachments()
+
+    result = list_vector_store_files(client, " vs_manifest ")
+
+    assert result == [first, second]
+    client.vector_stores.files.list.assert_called_once_with("vs_manifest")
+
+
+def test_blank_openai_file_id_rejected_before_retrieval() -> None:
+    client = make_client()
+
+    with pytest.raises(InvalidOpenAIFileIdError):
+        retrieve_openai_file(client, "")
+
+    client.files.retrieve.assert_not_called()
+
+
+def test_retrieve_openai_file_uses_expected_id() -> None:
+    client = make_client()
+    remote_file = SimpleNamespace(
+        id="file_expected",
+        filename="document.pdf",
+        bytes=123,
+    )
+    client.files.retrieve.return_value = remote_file
+
+    assert retrieve_openai_file(client, " file_expected ") is remote_file
+    client.files.retrieve.assert_called_once_with("file_expected")
+
+
+def test_retrieve_openai_file_rejects_returned_id_mismatch() -> None:
+    client = make_client()
+    client.files.retrieve.return_value = SimpleNamespace(id="file_other")
+
+    with pytest.raises(OpenAIFileIdMismatchError):
+        retrieve_openai_file(client, "file_expected")
