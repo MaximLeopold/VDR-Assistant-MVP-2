@@ -8,7 +8,8 @@ The current MVP supports one active VDR project at a time and one OpenAI vector 
 
 - Ask questions about VDR documents
 - Retrieve answers using OpenAI File Search
-- Display source files for supported answers
+- Display source files for supported answers, including VDR folder breadcrumbs
+  when the active case manifest is configured
 - Return a fallback response when information is not found in the VDR documents
 - Maintain short conversation history for follow-up questions
 - Reset the chat session from the sidebar
@@ -66,7 +67,14 @@ Example:
 OPENAI_API_KEY=your_openai_api_key_here
 OPENAI_MODEL=gpt-4.1
 VECTOR_STORE_ID=your_vector_store_id_here
+# Optional: local VDR root used to resolve folder-aware citations
+VDR_FOLDER=
 ```
+
+`VDR_FOLDER` is optional. Set it to the local VDR root whose sibling
+`VDR Assistant/manifest.json` belongs to the selected vector store. If the
+folder, manifest, or vector-store association is unavailable, Q&A continues
+with filename-only citations.
 
 Do not commit `.env` to GitHub.
 

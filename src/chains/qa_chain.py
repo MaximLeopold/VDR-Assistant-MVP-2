@@ -14,8 +14,10 @@ from pathlib import Path
 
 from src.config.constants import FALLBACK_ANSWER
 from src.context.conversation_context import build_conversation_context
+from src.ingestion.manifest import VDRManifest
 from src.retrieval.openai_file_search import search_vector_store
 from src.retrieval.citation_extractor import extract_response_data
+from src.retrieval.citation_resolver import resolve_citations
 from src.schemas.answer import VDRAnswer
 from src.validation.answer_validator import validate_answer
 
@@ -50,6 +52,7 @@ def run_qa_chain(
     question: str,
     vector_store_id: str,
     messages: list[dict] | None = None,
+    manifest: VDRManifest | None = None,
 ) -> VDRAnswer:
     """Run the Q&A workflow against the active VDR vector store."""
 
@@ -73,10 +76,14 @@ def run_qa_chain(
         )
 
         extracted = extract_response_data(raw_response)
+        source_files = resolve_citations(
+            citations=extracted["citations"],
+            manifest=manifest,
+        )
 
         validated_answer = validate_answer(
             answer=extracted["answer"],
-            source_files=extracted["source_files"],
+            source_files=source_files,
             quotes=extracted["quotes"],
             workflow="qa",
         )

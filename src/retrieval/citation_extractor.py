@@ -1,7 +1,7 @@
 """Extract answer text and file citations from OpenAI responses.
 
 This module converts the raw OpenAI response into answer text,
-citation objects, and source filenames used by the app.
+citation identities, and quotes used by the app.
 """
 
 """Extract useful information from an OpenAI Responses API object.
@@ -13,9 +13,20 @@ It hides the complexity of the OpenAI response structure from the
 rest of the codebase.
 """
 
+from src.schemas.citation import Citation
+
+
+def _optional_text(value: object) -> str | None:
+    """Return a trimmed non-empty string when one is available."""
+
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
 
 def extract_response_data(response):
-    """Extract answer text, source files and quotes.
+    """Extract answer text, citation identities and quotes.
 
     Args:
         response:
@@ -25,12 +36,12 @@ def extract_response_data(response):
         Dictionary containing:
 
         - answer
-        - source_files
+        - citations
         - quotes
     """
 
     answer = ""
-    source_files = []
+    citations = []
     quotes = []
 
     seen = set()
@@ -52,21 +63,30 @@ def extract_response_data(response):
                 if getattr(annotation, "type", "") != "file_citation":
                     continue
 
-                filename = getattr(annotation, "filename", "")
+                file_id = _optional_text(
+                    getattr(annotation, "file_id", None)
+                )
+                filename = _optional_text(
+                    getattr(annotation, "filename", None)
+                )
 
-                if not filename:
-                    filename = getattr(
-                        annotation,
-                        "file_id",
-                        "Unknown file",
-                    )
+                if file_id is not None:
+                    identity = ("file_id", file_id)
+                elif filename is not None:
+                    identity = ("filename", filename)
+                else:
+                    identity = ("unknown", None)
 
-                if filename not in seen:
-                    seen.add(filename)
-                    source_files.append(filename)
+                if identity in seen:
+                    continue
+
+                seen.add(identity)
+                citations.append(
+                    Citation(file_id=file_id, filename=filename)
+                )
 
     return {
         "answer": answer,
-        "source_files": source_files,
+        "citations": citations,
         "quotes": quotes,
     }

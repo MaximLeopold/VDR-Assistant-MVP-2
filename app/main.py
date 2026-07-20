@@ -15,9 +15,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.chains.qa_chain import run_qa_chain
 from src.config.constants import APP_TITLE
 from src.config.settings import (
+    VDR_FOLDER,
     VECTOR_STORE_ID,
     validate_settings,
 )
+from src.ingestion.active_manifest import load_active_manifest
 from src.ui.chat import (
     render_answer,
     render_chat_history,
@@ -84,6 +86,12 @@ if mode != "qa":
     st.stop()
 
 
+active_manifest = load_active_manifest(
+    vdr_folder=VDR_FOLDER,
+    vector_store_id=active_vector_store,
+)
+
+
 render_chat_history(st.session_state.messages)
 
 question = st.chat_input("Ask a question about the VDR...")
@@ -104,6 +112,7 @@ if question:
             question=question,
             vector_store_id=active_vector_store,
             messages=st.session_state.messages,
+            manifest=active_manifest,
         )
 
     assistant_message = {
