@@ -21,6 +21,7 @@ from src.config.settings import (
 )
 from src.ingestion.active_manifest import load_active_manifest
 from src.ui.chat import (
+    build_assistant_message,
     render_answer,
     render_chat_history,
 )
@@ -115,10 +116,7 @@ if question:
             manifest=active_manifest,
         )
 
-    assistant_message = {
-        "role": "assistant",
-        "content": answer.answer,
-    }
+    assistant_message = build_assistant_message(answer)
 
     st.session_state.messages.append(assistant_message)
     st.session_state.last_answer = answer

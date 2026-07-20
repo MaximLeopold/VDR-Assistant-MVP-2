@@ -9,21 +9,32 @@ from src.ingestion.manifest import VDRFileRecord, VDRManifest
 from src.schemas.answer import VDRAnswer
 
 
-def fake_response(*annotations, answer: str = "Supported answer"):
-    return SimpleNamespace(
-        output=[
+def fake_response(
+    *annotations,
+    answer: str = "Supported answer",
+    search_results: list | None = None,
+):
+    output = [
+        SimpleNamespace(
+            type="message",
+            content=[
+                SimpleNamespace(
+                    type="output_text",
+                    text=answer,
+                    annotations=list(annotations),
+                )
+            ],
+        )
+    ]
+    if search_results is not None:
+        output.append(
             SimpleNamespace(
-                type="message",
-                content=[
-                    SimpleNamespace(
-                        type="output_text",
-                        text=answer,
-                        annotations=list(annotations),
-                    )
-                ],
+                type="file_search_call",
+                status="completed",
+                results=search_results,
             )
-        ]
-    )
+        )
+    return SimpleNamespace(output=output)
 
 
 def citation(file_id: str, filename: str):
@@ -32,6 +43,15 @@ def citation(file_id: str, filename: str):
         filename=filename,
         index=0,
         type="file_citation",
+    )
+
+
+def search_result(file_id: str, filename: str, text: str):
+    return SimpleNamespace(
+        file_id=file_id,
+        filename=filename,
+        text=text,
+        score=0.8,
     )
 
 
@@ -92,7 +112,39 @@ def test_resolved_citations_are_passed_to_unchanged_validator(
         "VDR → 01 Finance → Annual Reports → Report.pdf"
     ]
     assert received["quotes"] == []
+    assert "sources" not in received
     assert answer.source_files == received["source_files"]
+
+
+def test_search_results_attach_after_successful_validation(monkeypatch) -> None:
+    monkeypatch.setattr(
+        qa_chain,
+        "search_vector_store",
+        lambda **kwargs: fake_response(
+            citation("file-A", "Report.pdf"),
+            search_results=[
+                search_result(
+                    "file-A",
+                    "Report.pdf",
+                    "  Retrieved passage  ",
+                ),
+                search_result("file-uncited", "Other.pdf", "Unrelated"),
+            ],
+        ),
+    )
+
+    answer = qa_chain.run_qa_chain(
+        "What is in the report?",
+        "vs-test",
+        manifest=manifest(),
+    )
+
+    assert answer.status == "success"
+    assert len(answer.sources) == 1
+    assert answer.sources[0].display_name == (
+        "VDR → 01 Finance → Annual Reports → Report.pdf"
+    )
+    assert answer.sources[0].evidence == ["Retrieved passage"]
 
 
 def test_manifest_none_preserves_filename_only_citations(monkeypatch) -> None:
@@ -106,6 +158,8 @@ def test_manifest_none_preserves_filename_only_citations(monkeypatch) -> None:
 
     assert answer.status == "success"
     assert answer.source_files == ["Report.pdf"]
+    assert answer.sources[0].display_name == "Report.pdf"
+    assert answer.sources[0].evidence == []
 
 
 def test_no_citations_preserves_not_found_fallback(monkeypatch) -> None:
@@ -119,7 +173,81 @@ def test_no_citations_preserves_not_found_fallback(monkeypatch) -> None:
 
     assert answer.status == "not_found"
     assert answer.answer == FALLBACK_ANSWER
+    assert answer.answer == (
+        "I can not find this information in the VDR documents"
+    )
     assert answer.source_files == []
+    assert answer.sources == []
+
+
+def test_retrieved_result_without_citation_does_not_create_success(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        qa_chain,
+        "search_vector_store",
+        lambda **kwargs: fake_response(
+            answer="Unsupported answer",
+            search_results=[
+                search_result("file-A", "Report.pdf", "Retrieved passage")
+            ],
+        ),
+    )
+
+    answer = qa_chain.run_qa_chain("Question", "vs-test")
+
+    assert answer.status == "not_found"
+    assert answer.answer == FALLBACK_ANSWER
+    assert answer.source_files == []
+    assert answer.sources == []
+
+
+def test_empty_search_results_do_not_invalidate_cited_answer(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        qa_chain,
+        "search_vector_store",
+        lambda **kwargs: fake_response(
+            citation("file-A", "Report.pdf"),
+            search_results=[],
+        ),
+    )
+
+    answer = qa_chain.run_qa_chain("Question", "vs-test")
+
+    assert answer.status == "success"
+    assert answer.source_files == ["Report.pdf"]
+    assert answer.sources[0].evidence == []
+
+
+def test_structured_sources_are_not_attached_after_failed_validation(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        qa_chain,
+        "search_vector_store",
+        lambda **kwargs: fake_response(
+            citation("file-A", "Report.pdf"),
+            search_results=[
+                search_result("file-A", "Report.pdf", "Retrieved passage")
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        qa_chain,
+        "validate_answer",
+        lambda **kwargs: VDRAnswer(
+            answer=FALLBACK_ANSWER,
+            status="not_found",
+            workflow="qa",
+        ),
+    )
+
+    answer = qa_chain.run_qa_chain("Question", "vs-test")
+
+    assert answer.status == "not_found"
+    assert answer.sources == []
 
 
 def test_retrieval_exception_preserves_error_fallback(monkeypatch) -> None:

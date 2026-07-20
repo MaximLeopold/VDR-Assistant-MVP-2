@@ -59,6 +59,7 @@ def search_vector_store(
                 "vector_store_ids": [vector_store_id],
             }
         ],
+        include=["file_search_call.results"],
     )
 
     return response

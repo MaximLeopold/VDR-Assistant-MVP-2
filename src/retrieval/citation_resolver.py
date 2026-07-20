@@ -4,6 +4,7 @@ from pathlib import PurePosixPath, PureWindowsPath
 
 from src.ingestion.manifest import VDRManifest
 from src.schemas.citation import Citation
+from src.schemas.evidence import RetrievedSearchResult, SourceReference
 
 
 UNKNOWN_SOURCE = "Unknown source"
@@ -74,3 +75,69 @@ def resolve_citations(
         resolved.append(_fallback_label(citation))
 
     return resolved
+
+
+def build_source_references(
+    citations: list[Citation],
+    source_files: list[str],
+    search_results: list[RetrievedSearchResult],
+) -> list[SourceReference]:
+    """Associate retrieved passages with cited sources by file ID only."""
+
+    if len(citations) != len(source_files):
+        raise ValueError(
+            "citations and source_files must contain the same number of items"
+        )
+
+    candidates_by_file_id: dict[
+        str,
+        list[tuple[int, RetrievedSearchResult, str]],
+    ] = {}
+
+    for original_index, result in enumerate(search_results):
+        file_id = _usable_text(result.file_id)
+        text = _usable_text(result.text)
+        if file_id is None or text is None:
+            continue
+
+        candidates_by_file_id.setdefault(file_id, []).append(
+            (original_index, result, text)
+        )
+
+    evidence_by_file_id: dict[str, list[str]] = {}
+
+    for file_id, candidates in candidates_by_file_id.items():
+        ranked_candidates = sorted(
+            candidates,
+            key=lambda item: (
+                item[1].score is None,
+                -item[1].score if item[1].score is not None else 0.0,
+                item[0],
+            ),
+        )
+
+        seen: set[str] = set()
+        evidence = []
+        for _, _, text in ranked_candidates:
+            if text in seen:
+                continue
+
+            seen.add(text)
+            evidence.append(text)
+
+        evidence_by_file_id[file_id] = evidence
+
+    sources = []
+    for citation, display_name in zip(citations, source_files):
+        file_id = _usable_text(citation.file_id)
+        sources.append(
+            SourceReference(
+                file_id=file_id,
+                display_name=display_name,
+                evidence=list(evidence_by_file_id.get(file_id, []))
+                if file_id is not None
+                else [],
+            )
+        )
+
+    return sources

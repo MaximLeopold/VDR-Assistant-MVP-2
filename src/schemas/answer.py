@@ -2,7 +2,9 @@
 
 from typing import List, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from src.schemas.evidence import SourceReference
 
 
 class VDRAnswer(BaseModel):
@@ -11,6 +13,8 @@ class VDRAnswer(BaseModel):
     answer: str
 
     source_files: List[str] = []
+
+    sources: list[SourceReference] = Field(default_factory=list)
 
     quotes: List[str] = []
 

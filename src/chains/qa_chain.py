@@ -5,9 +5,10 @@ This module orchestrates the full Q&A flow:
 1. Build conversation context.
 2. Load the Q&A prompt.
 3. Search the active OpenAI vector store.
-4. Extract answer text and source files.
-5. Validate the answer.
-6. Return a VDRAnswer object.
+4. Extract answer text, citations, and retrieved passages.
+5. Resolve and validate cited source files.
+6. Attach supplementary evidence to successful answers.
+7. Return a VDRAnswer object.
 """
 
 from pathlib import Path
@@ -17,7 +18,11 @@ from src.context.conversation_context import build_conversation_context
 from src.ingestion.manifest import VDRManifest
 from src.retrieval.openai_file_search import search_vector_store
 from src.retrieval.citation_extractor import extract_response_data
-from src.retrieval.citation_resolver import resolve_citations
+from src.retrieval.citation_resolver import (
+    build_source_references,
+    resolve_citations,
+)
+from src.retrieval.search_result_extractor import extract_search_results
 from src.schemas.answer import VDRAnswer
 from src.validation.answer_validator import validate_answer
 
@@ -76,6 +81,7 @@ def run_qa_chain(
         )
 
         extracted = extract_response_data(raw_response)
+        search_results = extract_search_results(raw_response)
         source_files = resolve_citations(
             citations=extracted["citations"],
             manifest=manifest,
@@ -87,6 +93,16 @@ def run_qa_chain(
             quotes=extracted["quotes"],
             workflow="qa",
         )
+
+        if validated_answer.status == "success":
+            sources = build_source_references(
+                citations=extracted["citations"],
+                source_files=source_files,
+                search_results=search_results,
+            )
+            validated_answer = validated_answer.model_copy(
+                update={"sources": sources}
+            )
 
         return validated_answer
 
