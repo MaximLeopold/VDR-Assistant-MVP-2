@@ -52,6 +52,12 @@ def _render_answer_content(answer: VDRAnswer) -> None:
 
     st.markdown(answer.answer)
 
+    if answer.verified_quotes:
+        st.markdown("**Verified quotations**")
+        for quote in answer.verified_quotes:
+            st.text(f"“{quote.text}”", width="stretch")
+            st.caption(f"Source: {quote.source_display_name}")
+
     if answer.sources:
         st.markdown("**Sources**")
         for source in answer.sources:
@@ -75,11 +81,6 @@ def _render_answer_content(answer: VDRAnswer) -> None:
         st.markdown("**Sources**")
         for source in answer.source_files:
             st.markdown(f"- {source}")
-
-    if answer.quotes:
-        with st.expander("Quotes"):
-            for quote in answer.quotes:
-                st.markdown(f"> {quote}")
 
 
 def render_chat_history(messages: list[dict]) -> None:

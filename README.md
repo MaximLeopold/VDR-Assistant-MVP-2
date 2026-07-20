@@ -10,6 +10,7 @@ The current MVP supports one active VDR project at a time and one OpenAI vector 
 - Retrieve answers using OpenAI File Search
 - Display source files for supported answers, including VDR folder breadcrumbs
   when the active case manifest is configured
+- Display concise, source-verified quotations beneath successful answers
 - Expand retrieved File Search passages beneath their cited sources in chat
 - Return a fallback response when information is not found in the VDR documents
 - Maintain short conversation history for follow-up questions
@@ -18,9 +19,14 @@ The current MVP supports one active VDR project at a time and one OpenAI vector 
 Each cited source displays up to two retrieved evidence excerpts, ordered by
 the relevance score returned by File Search and capped in length for
 readability. Full retrieved passages remain available internally, while the
-scores themselves are not displayed. Retrieved passages are supporting
-evidence, not yet verified direct quotations or proof of every answer claim.
-The sidebar stays citation-only; excerpts appear only beneath sources in chat.
+scores themselves are not displayed. Quote candidates are selected from cited
+retrieved evidence, and every displayed quotation is checked locally against
+the corresponding source text. Unverifiable candidates are omitted, and quote
+selection failure does not invalidate an otherwise supported answer. This
+verification establishes that the displayed wording occurs in retrieved
+evidence; it does not prove the broader answer is correct. Broader retrieved
+evidence remains available in expanders, while the sidebar stays citation-only.
+Retrieval and ranking tuning remain outside Milestone 1C.
 
 ## Fallback behavior
 

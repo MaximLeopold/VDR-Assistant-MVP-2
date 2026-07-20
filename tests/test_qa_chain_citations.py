@@ -1,12 +1,24 @@
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
 from openai.types.responses.response_output_text import AnnotationFileCitation
 
 from src.chains import qa_chain
 from src.config.constants import FALLBACK_ANSWER
 from src.ingestion.manifest import VDRFileRecord, VDRManifest
 from src.schemas.answer import VDRAnswer
+
+
+@pytest.fixture(autouse=True)
+def disable_quote_selection(monkeypatch) -> None:
+    """Keep Milestone 1A/1B regression tests isolated from API selection."""
+
+    monkeypatch.setattr(
+        qa_chain,
+        "select_quote_candidates",
+        lambda **kwargs: [],
+    )
 
 
 def fake_response(

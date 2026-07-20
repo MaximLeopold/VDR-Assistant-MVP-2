@@ -8,7 +8,8 @@ This module orchestrates the full Q&A flow:
 4. Extract answer text, citations, and retrieved passages.
 5. Resolve and validate cited source files.
 6. Attach supplementary evidence to successful answers.
-7. Return a VDRAnswer object.
+7. Select and locally verify concise source quotations.
+8. Return a VDRAnswer object.
 """
 
 from pathlib import Path
@@ -16,15 +17,20 @@ from pathlib import Path
 from src.config.constants import FALLBACK_ANSWER
 from src.context.conversation_context import build_conversation_context
 from src.ingestion.manifest import VDRManifest
-from src.retrieval.openai_file_search import search_vector_store
 from src.retrieval.citation_extractor import extract_response_data
 from src.retrieval.citation_resolver import (
     build_source_references,
     resolve_citations,
 )
+from src.retrieval.openai_file_search import search_vector_store
+from src.retrieval.quote_selector import (
+    build_quote_evidence_scope,
+    select_quote_candidates,
+)
 from src.retrieval.search_result_extractor import extract_search_results
 from src.schemas.answer import VDRAnswer
 from src.validation.answer_validator import validate_answer
+from src.validation.quote_verifier import verify_quote_candidates
 
 
 PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "qa.md"
@@ -94,14 +100,33 @@ def run_qa_chain(
             workflow="qa",
         )
 
-        if validated_answer.status == "success":
-            sources = build_source_references(
-                citations=extracted["citations"],
-                source_files=source_files,
-                search_results=search_results,
-            )
+        if validated_answer.status != "success":
+            return validated_answer
+
+        sources = build_source_references(
+            citations=extracted["citations"],
+            source_files=source_files,
+            search_results=search_results,
+        )
+        validated_answer = validated_answer.model_copy(
+            update={"sources": sources}
+        )
+
+        quote_sources = build_quote_evidence_scope(sources)
+        if not quote_sources:
+            return validated_answer
+
+        candidates = select_quote_candidates(
+            answer=validated_answer.answer,
+            quote_sources=quote_sources,
+        )
+        verified_quotes = verify_quote_candidates(
+            candidates=candidates,
+            quote_sources=quote_sources,
+        )
+        if verified_quotes:
             validated_answer = validated_answer.model_copy(
-                update={"sources": sources}
+                update={"verified_quotes": verified_quotes}
             )
 
         return validated_answer

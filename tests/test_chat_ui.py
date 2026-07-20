@@ -3,6 +3,7 @@ import pytest
 from src.context.conversation_context import build_conversation_context
 from src.schemas.answer import VDRAnswer
 from src.schemas.evidence import SourceReference
+from src.schemas.quotation import VerifiedQuote
 from src.ui import chat, source_panel
 
 
@@ -21,6 +22,7 @@ class FakeStreamlit:
         self.markdown_calls = []
         self.caption_calls = []
         self.text_calls = []
+        self.events = []
 
     def chat_message(self, role):
         self.chat_roles.append(role)
@@ -28,16 +30,20 @@ class FakeStreamlit:
 
     def expander(self, label):
         self.expander_labels.append(label)
+        self.events.append(("expander", label))
         return NullContext()
 
     def markdown(self, body):
         self.markdown_calls.append(body)
+        self.events.append(("markdown", body))
 
     def caption(self, body):
         self.caption_calls.append(body)
+        self.events.append(("caption", body))
 
     def text(self, body, **kwargs):
         self.text_calls.append((body, kwargs))
+        self.events.append(("text", body))
 
 
 def structured_answer() -> VDRAnswer:
@@ -64,6 +70,25 @@ def structured_answer() -> VDRAnswer:
             ),
         ],
         status="success",
+    )
+
+
+def answer_with_verified_quote() -> VDRAnswer:
+    return structured_answer().model_copy(
+        update={
+            "verified_quotes": [
+                VerifiedQuote(
+                    file_id="file-A",
+                    source_display_name=(
+                        "VDR → Finance → Annual Report.pdf"
+                    ),
+                    text=(
+                        "Revenue increased from €38.1 million "
+                        "to €42.6 million."
+                    ),
+                )
+            ]
+        }
     )
 
 
@@ -106,6 +131,52 @@ def test_render_answer_uses_safe_source_level_evidence_expander(
         for passage, _ in fake_st.text_calls
     )
     assert structured_answer().sources[0].evidence[2] == "Third passage"
+
+
+def test_verified_quotes_render_safely_between_answer_and_sources(
+    monkeypatch,
+) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+    answer = answer_with_verified_quote()
+
+    chat.render_answer(answer)
+
+    answer_event = ("markdown", "Supported answer")
+    heading_event = ("markdown", "**Verified quotations**")
+    source_event = ("markdown", "**Sources**")
+    assert fake_st.events.index(answer_event) < fake_st.events.index(heading_event)
+    assert fake_st.events.index(heading_event) < fake_st.events.index(source_event)
+    assert (
+        "“Revenue increased from €38.1 million to €42.6 million.”",
+        {"width": "stretch"},
+    ) in fake_st.text_calls
+    assert (
+        "Source: VDR → Finance → Annual Report.pdf"
+        in fake_st.caption_calls
+    )
+    assert all(
+        "Revenue increased from €38.1 million to €42.6 million."
+        not in markdown
+        for markdown in fake_st.markdown_calls
+    )
+
+    rendered = "\n".join(str(value) for _, value in fake_st.events)
+    assert "file-A" not in rendered
+    assert "score" not in rendered.lower()
+    assert "confidence" not in rendered.lower()
+    assert fake_st.expander_labels == [
+        "Retrieved evidence — VDR → Finance → Annual Report.pdf"
+    ]
+
+
+def test_verified_quotation_section_is_omitted_when_empty(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+
+    chat.render_answer(structured_answer())
+
+    assert "**Verified quotations**" not in fake_st.markdown_calls
 
 
 @pytest.mark.parametrize(
@@ -213,6 +284,22 @@ def test_assistant_message_serializes_complete_answer() -> None:
     assert "score" not in message["vdr_answer"]["sources"][0]
 
 
+def test_verified_quotes_survive_serialized_history_replay(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+    message = chat.build_assistant_message(answer_with_verified_quote())
+
+    chat.render_chat_history([message])
+
+    restored = VDRAnswer.model_validate(message["vdr_answer"])
+    assert restored.verified_quotes[0].file_id == "file-A"
+    assert (
+        "“Revenue increased from €38.1 million to €42.6 million.”",
+        {"width": "stretch"},
+    ) in fake_st.text_calls
+    assert "**Verified quotations**" in fake_st.markdown_calls
+
+
 def test_structured_answer_replays_after_rerun(monkeypatch) -> None:
     fake_st = FakeStreamlit()
     monkeypatch.setattr(chat, "st", fake_st)
@@ -249,6 +336,51 @@ def test_legacy_answer_payload_without_sources_validates() -> None:
     )
 
     assert answer.sources == []
+    assert answer.verified_quotes == []
+
+
+def test_old_structured_payload_without_verified_quotes_renders(
+    monkeypatch,
+) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+    payload = {
+        "answer": "Old structured answer",
+        "source_files": ["Report.pdf"],
+        "sources": [],
+        "status": "success",
+        "workflow": "qa",
+    }
+
+    chat.render_chat_history(
+        [
+            {
+                "role": "assistant",
+                "content": "Old structured answer",
+                "vdr_answer": payload,
+            }
+        ]
+    )
+
+    assert "Old structured answer" in fake_st.markdown_calls
+    assert "**Verified quotations**" not in fake_st.markdown_calls
+    assert "- Report.pdf" in fake_st.markdown_calls
+
+
+def test_legacy_quotes_are_not_rendered(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+    answer = VDRAnswer(
+        answer="Legacy structured answer",
+        source_files=["Report.pdf"],
+        quotes=["Unverified legacy quote"],
+    )
+
+    chat.render_answer(answer)
+
+    rendered = "\n".join(str(value) for _, value in fake_st.events)
+    assert "Unverified legacy quote" not in rendered
+    assert "Quotes" not in fake_st.expander_labels
 
 
 def test_conversation_context_ignores_structured_payload() -> None:

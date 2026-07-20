@@ -5,6 +5,7 @@ from typing import List, Literal
 from pydantic import BaseModel, Field
 
 from src.schemas.evidence import SourceReference
+from src.schemas.quotation import VerifiedQuote
 
 
 class VDRAnswer(BaseModel):
@@ -17,6 +18,8 @@ class VDRAnswer(BaseModel):
     sources: list[SourceReference] = Field(default_factory=list)
 
     quotes: List[str] = []
+
+    verified_quotes: list[VerifiedQuote] = Field(default_factory=list)
 
     warnings: List[str] = []
 

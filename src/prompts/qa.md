@@ -27,7 +27,8 @@ Every factual statement should be supported by at least one retrieved VDR source
 For every supported answer:
 
 - Provide a concise and professional summary.
-- Include direct quotations from the retrieved document(s) where appropriate.
+- Do not present retrieved document text as a direct quotation in the answer.
+- Verified quotations are selected and source-checked separately.
 - Identify the relevant source document(s).
 - Be objective and factual.
 - Clearly distinguish facts from assumptions.
