@@ -9,7 +9,8 @@ This module orchestrates the full Q&A flow:
 5. Resolve and validate cited source files.
 6. Attach supplementary evidence to successful answers.
 7. Select and locally verify concise source quotations.
-8. Return a VDRAnswer object.
+8. Select and locally verify structured evidence presentations.
+9. Return a VDRAnswer object.
 """
 
 from pathlib import Path
@@ -28,6 +29,14 @@ from src.retrieval.quote_selector import (
     select_quote_candidates,
 )
 from src.retrieval.search_result_extractor import extract_search_results
+from src.presentation.evidence_selector import (
+    build_evidence_presentation_scope,
+    select_evidence_presentations,
+)
+from src.presentation.evidence_verifier import (
+    attach_verified_presentations,
+    verify_evidence_presentations,
+)
 from src.schemas.answer import VDRAnswer
 from src.validation.answer_validator import validate_answer
 from src.validation.quote_verifier import verify_quote_candidates
@@ -113,20 +122,39 @@ def run_qa_chain(
         )
 
         quote_sources = build_quote_evidence_scope(sources)
-        if not quote_sources:
+        if quote_sources:
+            candidates = select_quote_candidates(
+                answer=validated_answer.answer,
+                quote_sources=quote_sources,
+            )
+            verified_quotes = verify_quote_candidates(
+                candidates=candidates,
+                quote_sources=sources,
+            )
+            if verified_quotes:
+                validated_answer = validated_answer.model_copy(
+                    update={"verified_quotes": verified_quotes}
+                )
+
+        presentation_scope = build_evidence_presentation_scope(sources)
+        if not presentation_scope:
             return validated_answer
 
-        candidates = select_quote_candidates(
-            answer=validated_answer.answer,
-            quote_sources=quote_sources,
+        presentation_selection = select_evidence_presentations(
+            presentation_scope
         )
-        verified_quotes = verify_quote_candidates(
-            candidates=candidates,
-            quote_sources=sources,
+        presentations_by_file_id = verify_evidence_presentations(
+            selection=presentation_selection,
+            sources=sources,
+            passage_scope=presentation_scope,
         )
-        if verified_quotes:
+        if presentations_by_file_id:
+            sources = attach_verified_presentations(
+                sources=sources,
+                presentations_by_file_id=presentations_by_file_id,
+            )
             validated_answer = validated_answer.model_copy(
-                update={"verified_quotes": verified_quotes}
+                update={"sources": sources}
             )
 
         return validated_answer

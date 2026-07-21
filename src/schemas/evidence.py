@@ -2,6 +2,8 @@
 
 from pydantic import BaseModel, Field
 
+from src.schemas.evidence_presentation import VerifiedEvidencePresentation
+
 
 class RetrievedSearchResult(BaseModel):
     """One result returned by a completed OpenAI File Search call."""
@@ -18,3 +20,6 @@ class SourceReference(BaseModel):
     file_id: str | None = None
     display_name: str
     evidence: list[str] = Field(default_factory=list)
+    presentations: list[VerifiedEvidencePresentation] = Field(
+        default_factory=list
+    )

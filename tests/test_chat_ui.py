@@ -3,6 +3,11 @@ import pytest
 from src.context.conversation_context import build_conversation_context
 from src.schemas.answer import VDRAnswer
 from src.schemas.evidence import SourceReference
+from src.schemas.evidence_presentation import (
+    VerifiedEvidenceMetric,
+    VerifiedEvidencePresentation,
+    VerifiedEvidenceTable,
+)
 from src.schemas.quotation import VerifiedQuote
 from src.ui import chat, source_panel
 
@@ -24,6 +29,9 @@ class FakeStreamlit:
         self.text_calls = []
         self.code_calls = []
         self.tabs_calls = []
+        self.columns_calls = []
+        self.metric_calls = []
+        self.table_calls = []
         self.events = []
 
     def chat_message(self, role):
@@ -55,6 +63,20 @@ class FakeStreamlit:
     def code(self, body, **kwargs):
         self.code_calls.append((body, kwargs))
         self.events.append(("code", body))
+
+    def columns(self, spec, **kwargs):
+        self.columns_calls.append((spec, kwargs))
+        self.events.append(("columns", spec))
+        count = spec if isinstance(spec, int) else len(spec)
+        return [NullContext() for _ in range(count)]
+
+    def metric(self, label, value, **kwargs):
+        self.metric_calls.append((label, value, kwargs))
+        self.events.append(("metric", (label, value)))
+
+    def table(self, data, **kwargs):
+        self.table_calls.append((data, kwargs))
+        self.events.append(("table", data))
 
 
 def structured_answer() -> VDRAnswer:
@@ -103,6 +125,49 @@ def answer_with_verified_quote() -> VDRAnswer:
     )
 
 
+def answer_with_verified_presentations() -> VDRAnswer:
+    answer = structured_answer()
+    source = answer.sources[0].model_copy(
+        update={
+            "presentations": [
+                VerifiedEvidencePresentation(
+                    passage_index=0,
+                    metrics=[
+                        VerifiedEvidenceMetric(
+                            label="Revenue",
+                            value="€42.6 million",
+                            period="FY2024",
+                            unit="EUR",
+                            source_text="METRIC_SOURCE_SPAN_INTERNAL",
+                        ),
+                        VerifiedEvidenceMetric(
+                            label="Margin",
+                            value="15.7%",
+                            source_text="SECOND_METRIC_SOURCE_SPAN_INTERNAL",
+                        ),
+                    ],
+                    tables=[
+                        VerifiedEvidenceTable(
+                            title="Revenue by year",
+                            columns=["Year", "Revenue"],
+                            rows=[
+                                ["2023", "€38.1 million"],
+                                ["2024", "€42.6 million"],
+                            ],
+                            source_texts=[
+                                "TABLE_HEADER_SOURCE_SPAN_INTERNAL",
+                                "TABLE_ROW_SOURCE_SPAN_INTERNAL_1",
+                                "TABLE_ROW_SOURCE_SPAN_INTERNAL_2",
+                            ],
+                        )
+                    ],
+                )
+            ]
+        }
+    )
+    return answer.model_copy(update={"sources": [source, answer.sources[1]]})
+
+
 def test_render_answer_uses_safe_source_level_evidence_expander(
     monkeypatch,
 ) -> None:
@@ -115,6 +180,14 @@ def test_render_answer_uses_safe_source_level_evidence_expander(
     assert fake_st.expander_labels == [
         "Retrieved evidence — VDR → Finance → Annual Report.pdf"
     ]
+    assert fake_st.events.index(
+        (
+            "expander",
+            "Retrieved evidence — VDR → Finance → Annual Report.pdf",
+        )
+    ) < fake_st.events.index(
+        ("markdown", "- VDR → Legal → Agreement.pdf")
+    )
     assert "- VDR → Legal → Agreement.pdf" in fake_st.markdown_calls
     assert fake_st.text_calls == [
         (
@@ -172,6 +245,170 @@ def test_render_answer_uses_safe_source_level_evidence_expander(
     assert structured_answer().sources[0].evidence[2] == "Third passage"
 
 
+def test_verified_presentations_add_default_structured_tab(
+    monkeypatch,
+) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+
+    chat.render_answer(answer_with_verified_presentations())
+
+    assert fake_st.expander_labels == [
+        "Retrieved evidence — VDR → Finance → Annual Report.pdf"
+    ]
+    assert fake_st.tabs_calls == [
+        (
+            ["Structured view", "Readable text", "Raw text"],
+            {"default": "Structured view"},
+        )
+    ]
+    assert fake_st.caption_calls.count(
+        "Structured from retrieved evidence; values are source-verified."
+    ) == 1
+    assert fake_st.caption_calls.count(
+        "Formatting cleanup only; document wording and values are unchanged."
+    ) == 1
+
+
+def test_verified_metrics_render_exact_strings_without_calculation_options(
+    monkeypatch,
+) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+
+    chat.render_answer(answer_with_verified_presentations())
+
+    assert fake_st.columns_calls == [(2, {})]
+    assert fake_st.metric_calls == [
+        ("Revenue — FY2024 — EUR", "€42.6 million", {}),
+        ("Margin", "15.7%", {}),
+    ]
+    assert all(isinstance(value, str) for _, value, _ in fake_st.metric_calls)
+    assert all(
+        "delta" not in kwargs
+        and "chart_data" not in kwargs
+        and "chart_type" not in kwargs
+        for _, _, kwargs in fake_st.metric_calls
+    )
+
+
+def test_verified_table_renders_exact_ordered_strings_without_index(
+    monkeypatch,
+) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+
+    chat.render_answer(answer_with_verified_presentations())
+
+    assert "Revenue by year" in fake_st.caption_calls
+    assert fake_st.table_calls == [
+        (
+            {
+                "Year": ["2023", "2024"],
+                "Revenue": ["€38.1 million", "€42.6 million"],
+            },
+            {"hide_index": True},
+        )
+    ]
+    table_data, _ = fake_st.table_calls[0]
+    assert list(table_data) == ["Year", "Revenue"]
+    assert all(
+        isinstance(cell, str)
+        for column in table_data.values()
+        for cell in column
+    )
+
+
+def test_structured_view_hides_verification_internals(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+
+    chat.render_answer(answer_with_verified_presentations())
+
+    rendered = "\n".join(str(value) for _, value in fake_st.events)
+    assert "file-A" not in rendered
+    assert "METRIC_SOURCE_SPAN_INTERNAL" not in rendered
+    assert "SECOND_METRIC_SOURCE_SPAN_INTERNAL" not in rendered
+    assert "TABLE_HEADER_SOURCE_SPAN_INTERNAL" not in rendered
+    assert "TABLE_ROW_SOURCE_SPAN_INTERNAL" not in rendered
+    assert "passage_index" not in rendered
+    assert "source_text" not in rendered
+    assert "score" not in rendered.lower()
+    assert "rejection" not in rendered.lower()
+    assert all(
+        value not in fake_st.markdown_calls
+        for value in (
+            "€42.6 million",
+            "15.7%",
+            "Revenue by year",
+            "2023",
+            "2024",
+        )
+    )
+
+
+def test_empty_presentations_do_not_add_structured_tab(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+    answer = structured_answer()
+    source = answer.sources[0].model_copy(
+        update={
+            "presentations": [
+                VerifiedEvidencePresentation(passage_index=0)
+            ]
+        }
+    )
+    answer = answer.model_copy(
+        update={"sources": [source, answer.sources[1]]}
+    )
+
+    chat.render_answer(answer)
+
+    assert fake_st.tabs_calls == [
+        (
+            ["Readable text", "Raw text"],
+            {"default": "Readable text"},
+        )
+    ]
+    assert fake_st.columns_calls == []
+    assert fake_st.metric_calls == []
+    assert fake_st.table_calls == []
+    assert (
+        "Structured from retrieved evidence; values are source-verified."
+        not in fake_st.caption_calls
+    )
+
+
+@pytest.mark.parametrize("component", ["metrics", "tables"])
+def test_each_verified_component_type_enables_structured_tab(
+    component: str,
+    monkeypatch,
+) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+    answer = answer_with_verified_presentations()
+    presentation = answer.sources[0].presentations[0]
+    presentation = presentation.model_copy(
+        update={
+            "metrics": presentation.metrics if component == "metrics" else [],
+            "tables": presentation.tables if component == "tables" else [],
+        }
+    )
+    source = answer.sources[0].model_copy(
+        update={"presentations": [presentation]}
+    )
+    answer = answer.model_copy(
+        update={"sources": [source, answer.sources[1]]}
+    )
+
+    chat.render_answer(answer)
+
+    assert fake_st.tabs_calls[0] == (
+        ["Structured view", "Readable text", "Raw text"],
+        {"default": "Structured view"},
+    )
+
+
 def test_verified_quotes_render_safely_between_answer_and_sources(
     monkeypatch,
 ) -> None:
@@ -216,6 +453,33 @@ def test_verified_quotation_section_is_omitted_when_empty(monkeypatch) -> None:
     chat.render_answer(structured_answer())
 
     assert "**Verified quotations**" not in fake_st.markdown_calls
+
+
+def test_verified_quotations_remain_before_structured_sources(
+    monkeypatch,
+) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+    answer = answer_with_verified_presentations().model_copy(
+        update={
+            "verified_quotes": answer_with_verified_quote().verified_quotes
+        }
+    )
+
+    chat.render_answer(answer)
+
+    quote_heading = ("markdown", "**Verified quotations**")
+    source_heading = ("markdown", "**Sources**")
+    structured_tabs = (
+        "tabs",
+        ["Structured view", "Readable text", "Raw text"],
+    )
+    assert fake_st.events.index(quote_heading) < fake_st.events.index(
+        source_heading
+    )
+    assert fake_st.events.index(source_heading) < fake_st.events.index(
+        structured_tabs
+    )
 
 
 @pytest.mark.parametrize(
@@ -406,6 +670,32 @@ def test_verified_quotes_survive_serialized_history_replay(monkeypatch) -> None:
         {"width": "stretch"},
     ) in fake_st.text_calls
     assert "**Verified quotations**" in fake_st.markdown_calls
+
+
+def test_verified_presentations_survive_serialized_history_replay(
+    monkeypatch,
+) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+    answer = answer_with_verified_presentations()
+    message = chat.build_assistant_message(answer)
+
+    chat.render_chat_history([message])
+
+    restored = VDRAnswer.model_validate(message["vdr_answer"])
+    assert restored == answer
+    assert fake_st.tabs_calls[0] == (
+        ["Structured view", "Readable text", "Raw text"],
+        {"default": "Structured view"},
+    )
+    assert fake_st.metric_calls == [
+        ("Revenue — FY2024 — EUR", "€42.6 million", {}),
+        ("Margin", "15.7%", {}),
+    ]
+    assert fake_st.table_calls[0][0] == {
+        "Year": ["2023", "2024"],
+        "Revenue": ["€38.1 million", "€42.6 million"],
+    }
 
 
 def test_structured_answer_replays_after_rerun(monkeypatch) -> None:
