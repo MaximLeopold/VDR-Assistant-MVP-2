@@ -361,6 +361,41 @@ def test_selector_receives_only_bounded_ranked_source_evidence(
     ]
 
 
+def test_quote_verification_receives_full_raw_source_evidence(
+    monkeypatch,
+) -> None:
+    raw_text = (
+        "\t Full raw passage\r\n"
+        + "x" * (quote_selector.MAX_QUOTE_PASSAGE_CHARS + 100)
+        + "  "
+    )
+    install_supported_search(
+        monkeypatch,
+        results=[search_result("file-A", raw_text)],
+    )
+    captured = {}
+
+    def select(**kwargs):
+        captured["selector_sources"] = kwargs["quote_sources"]
+        return [QuoteCandidate(file_id="file-A", quote="x" * 20)]
+
+    def verify(**kwargs):
+        captured["verifier_sources"] = kwargs["quote_sources"]
+        return []
+
+    monkeypatch.setattr(qa_chain, "select_quote_candidates", select)
+    monkeypatch.setattr(qa_chain, "verify_quote_candidates", verify)
+
+    answer = qa_chain.run_qa_chain("Question", "vs-test")
+
+    assert answer.sources[0].evidence == [raw_text]
+    assert captured["selector_sources"][0].evidence == [
+        raw_text.strip()[: quote_selector.MAX_QUOTE_PASSAGE_CHARS]
+    ]
+    assert captured["verifier_sources"] == answer.sources
+    assert captured["verifier_sources"][0].evidence == [raw_text]
+
+
 def test_retrieved_results_alone_cannot_create_success_or_quotes(
     monkeypatch,
 ) -> None:

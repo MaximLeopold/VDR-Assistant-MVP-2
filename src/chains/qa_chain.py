@@ -122,7 +122,7 @@ def run_qa_chain(
         )
         verified_quotes = verify_quote_candidates(
             candidates=candidates,
-            quote_sources=quote_sources,
+            quote_sources=sources,
         )
         if verified_quotes:
             validated_answer = validated_answer.model_copy(

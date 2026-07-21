@@ -156,7 +156,33 @@ def test_search_results_attach_after_successful_validation(monkeypatch) -> None:
     assert answer.sources[0].display_name == (
         "VDR → 01 Finance → Annual Reports → Report.pdf"
     )
-    assert answer.sources[0].evidence == ["Retrieved passage"]
+    assert answer.sources[0].evidence == ["  Retrieved passage  "]
+
+
+def test_exact_raw_evidence_reaches_structured_answer(monkeypatch) -> None:
+    raw_text = "\t Leading evidence\r\nwith €42.6m \u2003"
+    monkeypatch.setattr(
+        qa_chain,
+        "search_vector_store",
+        lambda **kwargs: fake_response(
+            citation("file-A", "Report.pdf"),
+            search_results=[
+                search_result("file-A", "Report.pdf", raw_text),
+            ],
+        ),
+    )
+
+    answer = qa_chain.run_qa_chain(
+        "What is in the report?",
+        "vs-test",
+        manifest=manifest(),
+    )
+
+    assert answer.status == "success"
+    assert answer.sources[0].evidence == [raw_text]
+    assert answer.source_files == [
+        "VDR → 01 Finance → Annual Reports → Report.pdf"
+    ]
 
 
 def test_manifest_none_preserves_filename_only_citations(monkeypatch) -> None:

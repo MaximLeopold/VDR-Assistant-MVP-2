@@ -11,7 +11,8 @@ The current MVP supports one active VDR project at a time and one OpenAI vector 
 - Display source files for supported answers, including VDR folder breadcrumbs
   when the active case manifest is configured
 - Display concise, source-verified quotations beneath successful answers
-- Expand retrieved File Search passages beneath their cited sources in chat
+- Expand retrieved File Search passages beneath their cited sources in chat,
+  with Readable and Raw text views
 - Return a fallback response when information is not found in the VDR documents
 - Maintain short conversation history for follow-up questions
 - Reset the chat session from the sidebar
@@ -26,6 +27,13 @@ selection failure does not invalidate an otherwise supported answer. This
 verification establishes that the displayed wording occurs in retrieved
 evidence; it does not prove the broader answer is correct. Broader retrieved
 evidence remains available in expanders, while the sidebar stays citation-only.
+Each evidence expander provides a Readable text tab and a Raw text tab. The
+Readable view applies deterministic whitespace and line-layout cleanup only;
+it does not change document wording, values, punctuation, capitalization, or
+ordering. The Raw view retains the original retrieved passage for the same
+bounded excerpt. This presentation does not reconstruct original PDF or slide
+layout, tables, metrics, or charts. Structured evidence cards and chart
+reconstruction remain deferred to later evidence-presentation phases.
 Retrieval and ranking tuning remain outside Milestone 1C.
 
 ## Fallback behavior
@@ -111,6 +119,7 @@ VDR-Assistant-MVP-2/
 |   |-- config/
 |   |-- context/
 |   |-- ingestion/
+|   |-- presentation/
 |   |-- prompts/
 |   |-- retrieval/
 |   |-- schemas/

@@ -3,38 +3,13 @@
 from pydantic import ValidationError
 import streamlit as st
 
+from src.presentation.evidence_text import (
+    MAX_VISIBLE_EVIDENCE_CHARS,
+    MAX_VISIBLE_EVIDENCE_PASSAGES,
+    clean_evidence_text,
+    truncate_evidence_excerpt,
+)
 from src.schemas.answer import VDRAnswer
-
-
-MAX_VISIBLE_EVIDENCE_PASSAGES = 2
-MAX_VISIBLE_EVIDENCE_CHARS = 1200
-
-
-def truncate_evidence_excerpt(
-    text: str,
-    max_chars: int = MAX_VISIBLE_EVIDENCE_CHARS,
-) -> str:
-    """Return a bounded, presentation-only excerpt of retrieved text."""
-
-    if max_chars < 0:
-        raise ValueError("max_chars must not be negative")
-
-    normalized = text.strip()
-    if len(normalized) <= max_chars:
-        return normalized
-
-    prefix = normalized[: max_chars + 1]
-    boundary = max(
-        (index for index, character in enumerate(prefix) if character.isspace()),
-        default=-1,
-    )
-
-    if boundary > 0:
-        excerpt = normalized[:boundary]
-    else:
-        excerpt = normalized[:max_chars]
-
-    return excerpt.rstrip() + "…"
 
 
 def build_assistant_message(answer: VDRAnswer) -> dict:
@@ -45,6 +20,40 @@ def build_assistant_message(answer: VDRAnswer) -> dict:
         "content": answer.answer,
         "vdr_answer": answer.model_dump(mode="json"),
     }
+
+
+def _render_evidence_views(evidence: list[str]) -> None:
+    """Render readable and raw views from the same bounded excerpts."""
+
+    raw_excerpts = [
+        truncate_evidence_excerpt(passage)
+        for passage in evidence[:MAX_VISIBLE_EVIDENCE_PASSAGES]
+    ]
+    readable_tab, raw_tab = st.tabs(
+        ["Readable text", "Raw text"],
+        default="Readable text",
+    )
+
+    with readable_tab:
+        st.caption(
+            "Formatting cleanup only; document wording and values are "
+            "unchanged."
+        )
+        for index, raw_excerpt in enumerate(raw_excerpts, start=1):
+            cleaned_excerpt = clean_evidence_text(raw_excerpt)
+            if not cleaned_excerpt:
+                continue
+            st.caption(f"Retrieved passage {index}")
+            st.text(cleaned_excerpt, width="stretch")
+
+    with raw_tab:
+        for index, raw_excerpt in enumerate(raw_excerpts, start=1):
+            st.caption(f"Retrieved passage {index}")
+            st.code(
+                raw_excerpt,
+                language=None,
+                wrap_lines=False,
+            )
 
 
 def _render_answer_content(answer: VDRAnswer) -> None:
@@ -68,15 +77,7 @@ def _render_answer_content(answer: VDRAnswer) -> None:
             with st.expander(
                 f"Retrieved evidence — {source.display_name}"
             ):
-                for index, passage in enumerate(
-                    source.evidence[:MAX_VISIBLE_EVIDENCE_PASSAGES],
-                    start=1,
-                ):
-                    st.caption(f"Retrieved passage {index}")
-                    st.text(
-                        truncate_evidence_excerpt(passage),
-                        width="stretch",
-                    )
+                _render_evidence_views(source.evidence)
     elif answer.source_files:
         st.markdown("**Sources**")
         for source in answer.source_files:

@@ -235,7 +235,7 @@ def test_duplicate_filenames_with_different_ids_keep_separate_evidence() -> None
     ]
 
 
-def test_passages_are_trimmed_deduplicated_per_file_and_all_retained() -> None:
+def test_passages_retain_raw_text_and_deduplicate_by_stripped_key() -> None:
     passages = [
         " First passage \nwith a second line ",
         "First passage \nwith a second line",
@@ -252,7 +252,7 @@ def test_passages_are_trimmed_deduplicated_per_file_and_all_retained() -> None:
     )
 
     assert sources[0].evidence == [
-        "First passage \nwith a second line",
+        " First passage \nwith a second line ",
         "Second passage",
         "Third passage",
         "Fourth passage",
@@ -325,6 +325,19 @@ def test_duplicate_text_keeps_highest_ranked_occurrence() -> None:
         "Duplicate passage",
         "Middle passage",
     ]
+
+
+def test_highest_ranked_duplicate_retains_its_original_raw_text() -> None:
+    sources = build_source_references(
+        [Citation(file_id="file-A", filename="report.pdf")],
+        ["report.pdf"],
+        [
+            search_result("file-A", " Duplicate passage ", 0.1),
+            search_result("file-A", "\tDuplicate passage\r\n", 0.9),
+        ],
+    )
+
+    assert sources[0].evidence == ["\tDuplicate passage\r\n"]
 
 
 def test_identical_text_under_different_file_ids_is_preserved() -> None:

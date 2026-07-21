@@ -47,6 +47,16 @@ def test_extracts_one_completed_result_with_optional_fields() -> None:
     ]
 
 
+def test_result_text_survives_extraction_exactly() -> None:
+    raw_text = "\u00a0 \tLeading\r\nText €42.6m\t\r\nTrailing\u2003 "
+
+    extracted = extract_search_results(
+        response_with(search_call(results=[result(text=raw_text)]))
+    )
+
+    assert extracted[0].text == raw_text
+
+
 def test_flattens_calls_and_preserves_output_and_result_order() -> None:
     extracted = extract_search_results(
         response_with(

@@ -22,6 +22,8 @@ class FakeStreamlit:
         self.markdown_calls = []
         self.caption_calls = []
         self.text_calls = []
+        self.code_calls = []
+        self.tabs_calls = []
         self.events = []
 
     def chat_message(self, role):
@@ -44,6 +46,15 @@ class FakeStreamlit:
     def text(self, body, **kwargs):
         self.text_calls.append((body, kwargs))
         self.events.append(("text", body))
+
+    def tabs(self, labels, **kwargs):
+        self.tabs_calls.append((list(labels), kwargs))
+        self.events.append(("tabs", list(labels)))
+        return [NullContext() for _ in labels]
+
+    def code(self, body, **kwargs):
+        self.code_calls.append((body, kwargs))
+        self.events.append(("code", body))
 
 
 def structured_answer() -> VDRAnswer:
@@ -112,7 +123,35 @@ def test_render_answer_uses_safe_source_level_evidence_expander(
         ),
         ("Second ranked passage", {"width": "stretch"}),
     ]
+    assert fake_st.code_calls == [
+        (
+            "First ranked passage\nwith Unicode €42.6 million",
+            {"language": None, "wrap_lines": False},
+        ),
+        (
+            "Second ranked passage",
+            {"language": None, "wrap_lines": False},
+        ),
+    ]
+    assert fake_st.tabs_calls == [
+        (
+            ["Readable text", "Raw text"],
+            {"default": "Readable text"},
+        )
+    ]
     assert fake_st.caption_calls == [
+        "Formatting cleanup only; document wording and values are unchanged.",
+        "Retrieved passage 1",
+        "Retrieved passage 2",
+        "Retrieved passage 1",
+        "Retrieved passage 2",
+    ]
+    assert fake_st.caption_calls.count(
+        "Formatting cleanup only; document wording and values are unchanged."
+    ) == 1
+    assert fake_st.caption_calls[1:] == [
+        "Retrieved passage 1",
+        "Retrieved passage 2",
         "Retrieved passage 1",
         "Retrieved passage 2",
     ]
@@ -184,7 +223,7 @@ def test_verified_quotation_section_is_omitted_when_empty(monkeypatch) -> None:
     [
         ("short text", 20, "short text"),
         ("exact text", 10, "exact text"),
-        ("  trimmed text  ", 20, "trimmed text"),
+        ("  raw text  ", 20, "  raw text  "),
         ("alpha beta gamma", 10, "alpha beta…"),
         ("abcdefghijk", 5, "abcde…"),
         ("äöüß漢字abcdef", 6, "äöüß漢字…"),
@@ -250,7 +289,75 @@ def test_ui_truncates_only_rendered_excerpt_and_preserves_stored_text(
         "Second passage",
     ]
     assert "Third passage" not in [text for text, _ in fake_st.text_calls]
+    assert [text for text, _ in fake_st.code_calls] == [
+        rendered_excerpt,
+        "Second passage",
+    ]
     assert all("Showing" not in caption for caption in fake_st.caption_calls)
+
+
+def test_readable_and_raw_views_share_the_same_bounded_excerpt(
+    monkeypatch,
+) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+    raw_passage = "\r\n  Heading  \r\n\r\n\r\nValue\t€42.6m  "
+    answer = VDRAnswer(
+        answer="Supported answer",
+        source_files=["Report.pdf"],
+        sources=[
+            SourceReference(
+                file_id="file-A",
+                display_name="Report.pdf",
+                evidence=[raw_passage],
+            )
+        ],
+    )
+
+    chat.render_answer(answer)
+
+    raw_excerpt = chat.truncate_evidence_excerpt(raw_passage)
+    assert fake_st.code_calls == [
+        (raw_excerpt, {"language": None, "wrap_lines": False})
+    ]
+    assert fake_st.text_calls == [
+        (
+            chat.clean_evidence_text(raw_excerpt),
+            {"width": "stretch"},
+        )
+    ]
+    assert raw_excerpt == raw_passage
+    assert raw_passage not in fake_st.markdown_calls
+    assert chat.clean_evidence_text(raw_excerpt) not in fake_st.markdown_calls
+
+
+def test_empty_readable_historical_passage_remains_available_as_raw(
+    monkeypatch,
+) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+    answer = VDRAnswer(
+        answer="Supported answer",
+        source_files=["Report.pdf"],
+        sources=[
+            SourceReference(
+                file_id="file-A",
+                display_name="Report.pdf",
+                evidence=[" \t\r\n "],
+            )
+        ],
+    )
+
+    chat.render_answer(answer)
+
+    assert fake_st.text_calls == []
+    assert fake_st.code_calls == [
+        (" \t\r\n ", {"language": None, "wrap_lines": False})
+    ]
+    assert fake_st.caption_calls == [
+        "Formatting cleanup only; document wording and values are unchanged.",
+        "Retrieved passage 1",
+    ]
 
 
 def test_source_without_evidence_has_no_evidence_expander(monkeypatch) -> None:
@@ -270,6 +377,7 @@ def test_source_without_evidence_has_no_evidence_expander(monkeypatch) -> None:
     chat.render_answer(answer)
 
     assert fake_st.expander_labels == []
+    assert fake_st.tabs_calls == []
     assert "- VDR → Legal → Agreement.pdf" in fake_st.markdown_calls
 
 
@@ -312,6 +420,38 @@ def test_structured_answer_replays_after_rerun(monkeypatch) -> None:
         "First ranked passage\nwith Unicode €42.6 million",
         {"width": "stretch"},
     )
+    assert fake_st.code_calls[0] == (
+        "First ranked passage\nwith Unicode €42.6 million",
+        {"language": None, "wrap_lines": False},
+    )
+
+
+def test_raw_evidence_survives_serialized_history_replay_exactly(
+    monkeypatch,
+) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+    raw_passage = "\t Leading\r\nEvidence €42.6m\u2003 "
+    answer = VDRAnswer(
+        answer="Supported answer",
+        source_files=["Report.pdf"],
+        sources=[
+            SourceReference(
+                file_id="file-A",
+                display_name="Report.pdf",
+                evidence=[raw_passage],
+            )
+        ],
+    )
+
+    chat.render_chat_history([chat.build_assistant_message(answer)])
+
+    assert fake_st.code_calls == [
+        (
+            raw_passage,
+            {"language": None, "wrap_lines": False},
+        )
+    ]
 
 
 def test_legacy_assistant_message_still_renders(monkeypatch) -> None:

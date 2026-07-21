@@ -91,17 +91,18 @@ def build_source_references(
 
     candidates_by_file_id: dict[
         str,
-        list[tuple[int, RetrievedSearchResult, str]],
+        list[tuple[int, RetrievedSearchResult, str, str]],
     ] = {}
 
     for original_index, result in enumerate(search_results):
         file_id = _usable_text(result.file_id)
-        text = _usable_text(result.text)
-        if file_id is None or text is None:
+        raw_text = result.text
+        deduplication_key = _usable_text(raw_text)
+        if file_id is None or deduplication_key is None:
             continue
 
         candidates_by_file_id.setdefault(file_id, []).append(
-            (original_index, result, text)
+            (original_index, result, raw_text, deduplication_key)
         )
 
     evidence_by_file_id: dict[str, list[str]] = {}
@@ -118,12 +119,12 @@ def build_source_references(
 
         seen: set[str] = set()
         evidence = []
-        for _, _, text in ranked_candidates:
-            if text in seen:
+        for _, _, raw_text, deduplication_key in ranked_candidates:
+            if deduplication_key in seen:
                 continue
 
-            seen.add(text)
-            evidence.append(text)
+            seen.add(deduplication_key)
+            evidence.append(raw_text)
 
         evidence_by_file_id[file_id] = evidence
 
