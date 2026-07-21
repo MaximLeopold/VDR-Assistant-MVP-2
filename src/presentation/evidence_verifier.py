@@ -7,8 +7,12 @@ from collections.abc import Iterable
 
 from pydantic import BaseModel, ConfigDict
 
+from src.presentation.parallel_series_verifier import (
+    verify_parallel_series_candidate,
+)
 from src.schemas.evidence import SourceReference
 from src.schemas.evidence_presentation import (
+    MAX_PARALLEL_CANDIDATES,
     EvidenceMetricCandidate,
     EvidencePresentationPassage,
     EvidencePresentationSelection,
@@ -145,6 +149,7 @@ class _VerifiedTableWithPosition(BaseModel):
     source_start: int
     source_end: int
     candidate_index: int
+    origin_priority: int = 0
 
 
 def _normalize_whitespace_with_spans(
@@ -929,6 +934,32 @@ def verify_evidence_presentations(
         )
         is not None
     ]
+    parallel_tables = []
+    for index, candidate in enumerate(
+        selection.parallel_series[:MAX_PARALLEL_CANDIDATES]
+    ):
+        verified_parallel = verify_parallel_series_candidate(
+            candidate,
+            sources,
+            passage_scope=indexed_scope,
+            candidate_index=index,
+        )
+        if verified_parallel is None:
+            continue
+        parallel_tables.append(
+            _VerifiedTableWithPosition(
+                match=VerifiedTableMatch(
+                    file_id=verified_parallel.file_id,
+                    passage_index=verified_parallel.passage_index,
+                    table=verified_parallel.table,
+                ),
+                source_start=verified_parallel.source_start,
+                source_end=verified_parallel.source_end,
+                candidate_index=verified_parallel.candidate_index,
+                origin_priority=1,
+            )
+        )
+    tables.extend(parallel_tables)
 
     metrics.sort(
         key=lambda item: (
@@ -944,6 +975,7 @@ def verify_evidence_presentations(
             source_order.get(item.match.file_id, len(sources)),
             item.match.passage_index,
             item.source_start,
+            item.origin_priority,
             item.source_end - item.source_start,
             item.candidate_index,
         )
@@ -958,12 +990,18 @@ def verify_evidence_presentations(
             deduplicated_metrics.append(metric)
 
     deduplicated_tables: list[_VerifiedTableWithPosition] = []
-    seen_tables: set[tuple[str, tuple[object, ...]]] = set()
+    seen_tables: dict[tuple[str, tuple[object, ...]], int] = {}
     for table in tables:
         key = (table.match.file_id, _table_key(table))
-        if key not in seen_tables:
-            seen_tables.add(key)
+        existing_index = seen_tables.get(key)
+        if existing_index is None:
+            seen_tables[key] = len(deduplicated_tables)
             deduplicated_tables.append(table)
+        elif (
+            table.origin_priority
+            < deduplicated_tables[existing_index].origin_priority
+        ):
+            deduplicated_tables[existing_index] = table
 
     components: list[
         tuple[str, _VerifiedMetricWithPosition | _VerifiedTableWithPosition]

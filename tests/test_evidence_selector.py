@@ -233,7 +233,7 @@ def test_selector_uses_one_raw_only_bounded_structured_request(monkeypatch) -> N
     assert captured["calls"] == 1
     assert captured["model"] == OPENAI_MODEL
     assert captured["text_format"] is EvidencePresentationSelection
-    assert captured["max_output_tokens"] == 3500
+    assert captured["max_output_tokens"] == 5000
     assert captured["instructions"] == (
         evidence_selector.PROMPT_PATH.read_text(encoding="utf-8")
     )
@@ -247,6 +247,31 @@ def test_selector_uses_one_raw_only_bounded_structured_request(monkeypatch) -> N
     assert "answer" not in captured["input"].lower()
     assert "score" not in captured["input"].lower()
     assert selected == selection
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Period 2024A 2025E 2026F\nRevenue 10 12 14",
+        "Period FY25 FY26 FY27\nEBITDA 5.2 6.1 7.4",
+        "Period Q1 27 Q2 27 Q3 27\nRevenue 10 12 14",
+        "Period H1 2025 H2 2025\nRevenue 10 12",
+        "Scenario Base Upside Downside\nRevenue 10 12 9",
+        "Period LTM NTM\nRevenue 10 12",
+    ],
+)
+def test_horizontal_financial_markers_are_eligible(text: str) -> None:
+    assert evidence_selector.is_structured_evidence_candidate(text) is True
+
+
+def test_prompt_requests_fail_closed_parallel_series_without_charts() -> None:
+    prompt = evidence_selector.PROMPT_PATH.read_text(encoding="utf-8")
+
+    assert "parallel-series candidate" in prompt
+    assert "one logical line" in prompt
+    assert "flattened onto one line" in prompt
+    assert "Do not return an incomplete table" in prompt
+    assert "chart specification" in prompt
 
 
 def test_empty_scope_does_not_create_client(monkeypatch) -> None:

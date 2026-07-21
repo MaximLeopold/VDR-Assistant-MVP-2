@@ -6,7 +6,9 @@ from openai.types.responses.response_output_text import AnnotationFileCitation
 from src.chains import qa_chain
 from src.config.constants import FALLBACK_ANSWER
 from src.schemas.evidence_presentation import (
+    EvidenceParallelSeriesCandidate,
     EvidencePresentationSelection,
+    EvidenceSeriesCandidate,
     VerifiedEvidenceMetric,
     VerifiedEvidencePresentation,
     VerifiedEvidenceTable,
@@ -422,3 +424,66 @@ def test_retrieval_error_never_runs_phase_2a(monkeypatch) -> None:
     assert answer.status == "error"
     assert answer.answer == FALLBACK_ANSWER
     assert answer.sources == []
+
+
+def test_same_selector_call_converts_parallel_series_for_correct_source(
+    monkeypatch,
+) -> None:
+    horizontal = (
+        "Period 2024A 2025E 2026E\n"
+        "Revenue 10 12 14\n"
+        "Costs 7 8 9"
+    )
+    monkeypatch.setattr(
+        qa_chain,
+        "search_vector_store",
+        lambda **kwargs: response(
+            citation("file-A", "Report.pdf"),
+            results=[search_result("file-A", "Report.pdf", horizontal)],
+        ),
+    )
+    selector_calls = []
+
+    def select(passages):
+        selector_calls.append(passages)
+        return EvidencePresentationSelection(
+            parallel_series=[
+                EvidenceParallelSeriesCandidate(
+                    file_id="file-A",
+                    passage_index=0,
+                    category_label="Period",
+                    categories=["2024A", "2025E", "2026E"],
+                    category_source_span="Period 2024A 2025E 2026E",
+                    series=[
+                        EvidenceSeriesCandidate(
+                            label="Revenue",
+                            values=["10", "12", "14"],
+                            source_span="Revenue 10 12 14",
+                        ),
+                        EvidenceSeriesCandidate(
+                            label="Costs",
+                            values=["7", "8", "9"],
+                            source_span="Costs 7 8 9",
+                        ),
+                    ],
+                )
+            ]
+        )
+
+    monkeypatch.setattr(qa_chain, "select_evidence_presentations", select)
+
+    answer = qa_chain.run_qa_chain("Question", "vs-test")
+
+    assert answer.status == "success"
+    assert len(selector_calls) == 1
+    assert answer.sources[0].file_id == "file-A"
+    assert answer.sources[0].presentations[0].tables[0].columns == [
+        "Period",
+        "Revenue",
+        "Costs",
+    ]
+    assert answer.sources[0].presentations[0].tables[0].rows[0] == [
+        "2024A",
+        "10",
+        "7",
+    ]

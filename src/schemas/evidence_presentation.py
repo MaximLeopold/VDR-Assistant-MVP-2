@@ -10,6 +10,11 @@ MAX_CANDIDATE_TABLES = 4
 MAX_CANDIDATE_TABLE_ROWS = 15
 MAX_CANDIDATE_TABLE_COLUMNS = 6
 MAX_CANDIDATE_TABLE_CELLS = 90
+MAX_PARALLEL_CANDIDATES = 4
+MAX_PARALLEL_CATEGORIES = 15
+MAX_PARALLEL_SERIES = 5
+MAX_PARALLEL_VALUES_PER_SERIES = 15
+MAX_PARALLEL_DATA_POINTS = 75
 
 
 class _StrictPresentationModel(BaseModel):
@@ -76,6 +81,35 @@ class EvidenceTableCandidate(_StrictPresentationModel):
         return self
 
 
+class EvidenceSeriesCandidate(_StrictPresentationModel):
+    """One transient labelled value sequence from a horizontal table."""
+
+    label: str = Field(min_length=1)
+    values: list[str] = Field(
+        min_length=2,
+        max_length=MAX_PARALLEL_VALUES_PER_SERIES,
+    )
+    source_span: str = Field(min_length=1)
+    unit: str | None = None
+
+
+class EvidenceParallelSeriesCandidate(_StrictPresentationModel):
+    """Transient horizontal category and value sequences for local verification."""
+
+    file_id: str = Field(min_length=1)
+    passage_index: int = Field(ge=0)
+    category_label: str = Field(min_length=1)
+    categories: list[str] = Field(
+        min_length=2,
+        max_length=MAX_PARALLEL_CATEGORIES,
+    )
+    category_source_span: str = Field(min_length=1)
+    series: list[EvidenceSeriesCandidate] = Field(
+        min_length=1,
+        max_length=MAX_PARALLEL_SERIES,
+    )
+
+
 class EvidencePresentationSelection(_StrictPresentationModel):
     """Structured candidates returned by the presentation request."""
 
@@ -86,6 +120,10 @@ class EvidencePresentationSelection(_StrictPresentationModel):
     tables: list[EvidenceTableCandidate] = Field(
         default_factory=list,
         max_length=MAX_CANDIDATE_TABLES,
+    )
+    parallel_series: list[EvidenceParallelSeriesCandidate] = Field(
+        default_factory=list,
+        max_length=MAX_PARALLEL_CANDIDATES,
     )
 
 

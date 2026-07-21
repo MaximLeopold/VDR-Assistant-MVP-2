@@ -849,3 +849,60 @@ def test_sidebar_remains_citation_only(monkeypatch) -> None:
     assert "VDR → Legal → Agreement.pdf" in rendered
     assert "First ranked passage" not in rendered
     assert "file-A" not in rendered
+
+
+def test_converted_parallel_table_reuses_structured_history_renderer(
+    monkeypatch,
+) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+    horizontal = (
+        "Period 2024A 2025E\n"
+        "Revenue EURm 10 12"
+    )
+    table = VerifiedEvidenceTable(
+        title=None,
+        columns=["Period", "Revenue — EURm"],
+        rows=[["2024A", "10"], ["2025E", "12"]],
+        source_texts=horizontal.splitlines(),
+    )
+    answer = VDRAnswer(
+        answer="Supported answer",
+        source_files=["Report.pdf"],
+        sources=[
+            SourceReference(
+                file_id="file-A",
+                display_name="Report.pdf",
+                evidence=[horizontal],
+                presentations=[
+                    VerifiedEvidencePresentation(
+                        passage_index=0,
+                        tables=[table],
+                    )
+                ],
+            )
+        ],
+    )
+
+    chat.render_chat_history([chat.build_assistant_message(answer)])
+
+    assert fake_st.tabs_calls == [
+        (
+            ["Structured view", "Readable text", "Raw text"],
+            {"default": "Structured view"},
+        )
+    ]
+    assert fake_st.table_calls == [
+        (
+            {
+                "Period": ["2024A", "2025E"],
+                "Revenue — EURm": ["10", "12"],
+            },
+            {"hide_index": True},
+        )
+    ]
+    rendered = "\n".join(str(value) for _, value in fake_st.events)
+    assert "file-A" not in rendered
+    assert "source_span" not in rendered
+    assert "score" not in rendered
+    assert "chart" not in rendered.lower()

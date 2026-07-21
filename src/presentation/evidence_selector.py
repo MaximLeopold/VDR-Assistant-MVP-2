@@ -20,6 +20,7 @@ from src.schemas.evidence_presentation import (
     MAX_CANDIDATE_TABLE_COLUMNS,
     MAX_CANDIDATE_TABLE_ROWS,
     MAX_CANDIDATE_TABLES,
+    MAX_PARALLEL_CANDIDATES,
     MAX_PRESENTATION_CHARS_PER_PASSAGE,
     EvidencePresentationPassage,
     EvidencePresentationSelection,
@@ -29,7 +30,7 @@ from src.schemas.evidence_presentation import (
 MAX_PRESENTATION_SOURCES = 4
 MAX_PRESENTATION_PASSAGES_PER_SOURCE = 2
 MAX_PRESENTATION_TOTAL_CHARS = 16000
-MAX_PRESENTATION_OUTPUT_TOKENS = 3500
+MAX_PRESENTATION_OUTPUT_TOKENS = 5000
 
 PROMPT_PATH = (
     Path(__file__).resolve().parents[1]
@@ -51,6 +52,16 @@ _NUMERIC_TOKEN_RE = re.compile(
 _YEAR_OR_DATE_RE = re.compile(
     r"\b(?:FY\s*)?(?:19|20)\d{2}\b"
     r"|\b\d{1,2}[./-]\d{1,2}[./-](?:\d{2}|\d{4})\b",
+    re.IGNORECASE,
+)
+_FINANCIAL_CATEGORY_RE = re.compile(
+    r"(?<![\w])(?:"
+    r"(?:19|20)\d{2}(?:PF|[AEF])?"
+    r"|FY[ \t]*(?:\d{2}|(?:19|20)\d{2})(?:PF|[AEF])?"
+    r"|(?:Q[1-4]|H[12])[ \t]+(?:\d{2}|(?:19|20)\d{2})(?:PF|[AEF])?"
+    r"|LTM|NTM|Actual|Estimate|Forecast|Budget|Plan"
+    r"|Base|Upside|Downside"
+    r")(?![\w])",
     re.IGNORECASE,
 )
 _CURRENCY_OR_PERCENT_RE = re.compile(
@@ -89,6 +100,14 @@ def is_structured_evidence_candidate(text: str) -> bool:
     numeric_count = len(_numeric_spans(text))
     period_count = len(_YEAR_OR_DATE_RE.findall(text))
     has_currency_or_percent = _CURRENCY_OR_PERCENT_RE.search(text) is not None
+    financial_category_count = len(_FINANCIAL_CATEGORY_RE.findall(text))
+
+    if (
+        has_alphabetic
+        and financial_category_count >= 2
+        and numeric_count >= 2
+    ):
+        return True
 
     if has_alphabetic and numeric_count >= 4:
         return True
@@ -293,6 +312,7 @@ def select_evidence_presentations(
     if (
         len(selection.metrics) > MAX_CANDIDATE_METRICS
         or len(selection.tables) > MAX_CANDIDATE_TABLES
+        or len(selection.parallel_series) > MAX_PARALLEL_CANDIDATES
     ):
         return empty_selection
 

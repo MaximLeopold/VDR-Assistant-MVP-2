@@ -5,8 +5,10 @@ from src.schemas.answer import VDRAnswer
 from src.schemas.evidence import SourceReference
 from src.schemas.evidence_presentation import (
     EvidenceMetricCandidate,
+    EvidenceParallelSeriesCandidate,
     EvidencePresentationPassage,
     EvidencePresentationSelection,
+    EvidenceSeriesCandidate,
     EvidenceTableCandidate,
     VerifiedEvidenceMetric,
     VerifiedEvidencePresentation,
@@ -45,6 +47,35 @@ def table_candidate(
     )
 
 
+def parallel_candidate(
+    *,
+    categories: list[str] | None = None,
+    series: list[EvidenceSeriesCandidate] | None = None,
+) -> EvidenceParallelSeriesCandidate:
+    selected_categories = (
+        ["2024A", "2025E"] if categories is None else categories
+    )
+    selected_series = (
+        [
+            EvidenceSeriesCandidate(
+                label="Revenue",
+                values=["10", "12"],
+                source_span="Revenue 10 12",
+            )
+        ]
+        if series is None
+        else series
+    )
+    return EvidenceParallelSeriesCandidate(
+        file_id="file-A",
+        passage_index=0,
+        category_label="Period",
+        categories=selected_categories,
+        category_source_span=f"Period {' '.join(selected_categories)}",
+        series=selected_series,
+    )
+
+
 def test_candidate_and_verified_lists_default_to_independent_empty_lists() -> None:
     first_selection = EvidencePresentationSelection()
     second_selection = EvidencePresentationSelection()
@@ -62,6 +93,7 @@ def test_candidate_and_verified_lists_default_to_independent_empty_lists() -> No
 
     assert second_selection.metrics == []
     assert second_selection.tables == []
+    assert second_selection.parallel_series == []
     assert second_presentation.metrics == []
     assert second_presentation.tables == []
 
@@ -132,7 +164,10 @@ def test_verified_presentation_round_trips_through_answer_json() -> None:
 
 
 def test_candidate_models_are_transient_not_answer_fields() -> None:
-    selection = EvidencePresentationSelection(metrics=[metric_candidate()])
+    selection = EvidencePresentationSelection(
+        metrics=[metric_candidate()],
+        parallel_series=[parallel_candidate()],
+    )
     answer = VDRAnswer(
         answer="Supported answer",
         sources=[SourceReference(display_name="Report.pdf")],
@@ -143,6 +178,7 @@ def test_candidate_models_are_transient_not_answer_fields() -> None:
     assert selection.metrics
     assert "metrics" not in payload
     assert "tables" not in payload
+    assert "parallel_series" not in payload
     assert "candidates" not in payload
 
 
@@ -204,3 +240,84 @@ def test_models_reject_coercion_and_extra_fields() -> None:
 
     with pytest.raises(ValidationError):
         EvidencePresentationSelection.model_validate({"unexpected": []})
+
+
+def test_existing_phase_2a_selection_payload_remains_valid() -> None:
+    selection = EvidencePresentationSelection.model_validate(
+        {"metrics": [metric_candidate().model_dump()], "tables": []}
+    )
+
+    assert selection.parallel_series == []
+
+
+@pytest.mark.parametrize(
+    ("categories", "series"),
+    [
+        (["2024A"], None),
+        ([f"FY{index:02d}" for index in range(16)], None),
+        (["2024A", "2025E"], []),
+        (
+            ["2024A", "2025E"],
+            [
+                EvidenceSeriesCandidate(
+                    label=f"Series {index}",
+                    values=["1", "2"],
+                    source_span=f"Series {index} 1 2",
+                )
+                for index in range(6)
+            ],
+        ),
+    ],
+)
+def test_parallel_candidate_rejects_category_and_series_limit_violations(
+    categories: list[str],
+    series: list[EvidenceSeriesCandidate] | None,
+) -> None:
+    with pytest.raises(ValidationError):
+        parallel_candidate(categories=categories, series=series)
+
+
+@pytest.mark.parametrize("values", [["1"], [str(index) for index in range(16)]])
+def test_parallel_series_rejects_value_limit_violations(values: list[str]) -> None:
+    with pytest.raises(ValidationError):
+        EvidenceSeriesCandidate(
+            label="Revenue",
+            values=values,
+            source_span="Revenue values",
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"label": "", "values": ["1", "2"], "source_span": "x"},
+        {"label": "Revenue", "values": ["1", "2"], "source_span": ""},
+        {"label": "Revenue", "values": "1 2", "source_span": "x"},
+        {
+            "label": "Revenue",
+            "values": ["1", "2"],
+            "source_span": "x",
+            "confidence": 1.0,
+        },
+    ],
+)
+def test_parallel_series_is_strict_and_rejects_empty_or_extra_fields(
+    payload: dict,
+) -> None:
+    with pytest.raises(ValidationError):
+        EvidenceSeriesCandidate.model_validate(payload)
+
+
+def test_selection_rejects_more_than_four_parallel_candidates() -> None:
+    with pytest.raises(ValidationError):
+        EvidencePresentationSelection(
+            parallel_series=[parallel_candidate()] * 5
+        )
+
+
+def test_parallel_schema_is_present_in_openai_json_schema() -> None:
+    schema = EvidencePresentationSelection.model_json_schema()
+
+    assert "parallel_series" in schema["properties"]
+    assert "EvidenceParallelSeriesCandidate" in schema["$defs"]
+    assert "EvidenceSeriesCandidate" in schema["$defs"]

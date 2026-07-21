@@ -1,6 +1,7 @@
 import pytest
 
 from src.presentation import evidence_verifier
+from src.presentation.parallel_series_verifier import VerifiedParallelSeriesMatch
 from src.presentation.evidence_verifier import (
     attach_verified_presentations,
     verify_evidence_presentations,
@@ -10,10 +11,13 @@ from src.presentation.evidence_verifier import (
 from src.schemas.evidence import SourceReference
 from src.schemas.evidence_presentation import (
     EvidenceMetricCandidate,
+    EvidenceParallelSeriesCandidate,
     EvidencePresentationPassage,
     EvidencePresentationSelection,
+    EvidenceSeriesCandidate,
     EvidenceTableCandidate,
     VerifiedEvidencePresentation,
+    VerifiedEvidenceTable,
 )
 
 
@@ -81,6 +85,34 @@ def table(
             if row_source_spans is None
             else row_source_spans
         ),
+    )
+
+
+def parallel(
+    *,
+    file_id: str = "file-A",
+    passage_index: int = 0,
+    categories: list[str] | None = None,
+    series: list[EvidenceSeriesCandidate] | None = None,
+    category_span: str | None = None,
+) -> EvidenceParallelSeriesCandidate:
+    selected_categories = categories or ["2024A", "2025E", "2026E"]
+    return EvidenceParallelSeriesCandidate(
+        file_id=file_id,
+        passage_index=passage_index,
+        category_label="Period",
+        categories=selected_categories,
+        category_source_span=(
+            category_span or f"Period {' '.join(selected_categories)}"
+        ),
+        series=series
+        or [
+            EvidenceSeriesCandidate(
+                label="Revenue",
+                values=["10", "12", "14"],
+                source_span="Revenue 10 12 14",
+            )
+        ],
     )
 
 
@@ -1180,3 +1212,168 @@ def test_attach_verified_presentations_copies_sources_without_mutation() -> None
     assert attached[0].presentations == [presentation]
     assert attached[1].presentations == []
     assert attached[0].evidence == ["raw A"]
+
+
+def test_valid_parallel_candidate_becomes_existing_verified_table() -> None:
+    passage = (
+        "Period 2024A 2025E 2026E\n"
+        "Revenue 10 12 14\n"
+        "Costs 7 8 9"
+    )
+    selection = EvidencePresentationSelection(
+        parallel_series=[
+            parallel(
+                series=[
+                    EvidenceSeriesCandidate(
+                        label="Revenue",
+                        values=["10", "12", "14"],
+                        source_span="Revenue 10 12 14",
+                    ),
+                    EvidenceSeriesCandidate(
+                        label="Costs",
+                        values=["7", "8", "9"],
+                        source_span="Costs 7 8 9",
+                    ),
+                ]
+            )
+        ]
+    )
+    scope = [
+        EvidencePresentationPassage(
+            file_id="file-A",
+            passage_index=0,
+            text=passage,
+        )
+    ]
+
+    verified = verify_evidence_presentations(
+        selection,
+        [source(evidence=[passage])],
+        scope,
+    )
+
+    assert verified["file-A"][0].tables == [
+        VerifiedEvidenceTable(
+            title=None,
+            columns=["Period", "Revenue", "Costs"],
+            rows=[
+                ["2024A", "10", "7"],
+                ["2025E", "12", "8"],
+                ["2026E", "14", "9"],
+            ],
+            source_texts=passage.splitlines(),
+        )
+    ]
+
+
+def test_rejected_parallel_candidate_does_not_remove_phase_2a_metric() -> None:
+    passage = (
+        "Revenue FY2024 EURm 28,051\n\n"
+        "Period 2024A 2025E 2026E\n"
+        "Revenue 10 12"
+    )
+    selection = EvidencePresentationSelection(
+        metrics=[metric()],
+        parallel_series=[parallel()],
+    )
+
+    verified = verify_evidence_presentations(
+        selection,
+        [source(evidence=[passage])],
+        [
+            EvidencePresentationPassage(
+                file_id="file-A",
+                passage_index=0,
+                text=passage,
+            )
+        ],
+    )
+
+    assert [item.value for item in verified["file-A"][0].metrics] == [
+        "28,051"
+    ]
+    assert verified["file-A"][0].tables == []
+
+
+def test_one_verified_table_per_passage_limit_applies_to_parallel_tables() -> None:
+    first = "Period 2024A 2025E 2026E\nRevenue 10 12 14"
+    second = "Period FY24 FY25 FY26\nCosts 7 8 9"
+    passage = f"{first}\n\n{second}"
+    selection = EvidencePresentationSelection(
+        parallel_series=[
+            parallel(),
+            parallel(
+                categories=["FY24", "FY25", "FY26"],
+                category_span="Period FY24 FY25 FY26",
+                series=[
+                    EvidenceSeriesCandidate(
+                        label="Costs",
+                        values=["7", "8", "9"],
+                        source_span="Costs 7 8 9",
+                    )
+                ],
+            ),
+        ]
+    )
+
+    verified = verify_evidence_presentations(
+        selection,
+        [source(evidence=[passage])],
+        [
+            EvidencePresentationPassage(
+                file_id="file-A",
+                passage_index=0,
+                text=passage,
+            )
+        ],
+    )
+
+    assert len(verified["file-A"][0].tables) == 1
+    assert verified["file-A"][0].tables[0].columns == ["Period", "Revenue"]
+
+
+def test_exact_native_and_parallel_duplicate_prefers_native_support(
+    monkeypatch,
+) -> None:
+    passage = "Year Revenue\n2023 10\n2024 12"
+    converted = VerifiedEvidenceTable(
+        title=None,
+        columns=["Year", "Revenue"],
+        rows=[["2023", "10"], ["2024", "12"]],
+        source_texts=["PARALLEL SUPPORT"],
+    )
+    monkeypatch.setattr(
+        evidence_verifier,
+        "verify_parallel_series_candidate",
+        lambda *args, **kwargs: VerifiedParallelSeriesMatch(
+            file_id="file-A",
+            passage_index=0,
+            table=converted,
+            source_start=0,
+            source_end=len(passage),
+            candidate_index=0,
+        ),
+    )
+    selection = EvidencePresentationSelection(
+        tables=[
+            table(
+                columns=["Year", "Revenue"],
+                rows=[["2023", "10"], ["2024", "12"]],
+            )
+        ],
+        parallel_series=[parallel()],
+    )
+
+    verified = verify_evidence_presentations(
+        selection,
+        [source(evidence=[passage])],
+        [
+            EvidencePresentationPassage(
+                file_id="file-A",
+                passage_index=0,
+                text=passage,
+            )
+        ],
+    )
+
+    assert verified["file-A"][0].tables[0].source_texts == passage.splitlines()
