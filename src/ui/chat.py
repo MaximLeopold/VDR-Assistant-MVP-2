@@ -1,5 +1,7 @@
 """Chat UI components for the VDR Assistant."""
 
+import re
+
 from pydantic import ValidationError
 import streamlit as st
 
@@ -10,7 +12,43 @@ from src.presentation.evidence_text import (
     truncate_evidence_excerpt,
 )
 from src.schemas.answer import VDRAnswer
+from src.schemas.evidence import SourceReference
 from src.schemas.evidence_presentation import VerifiedEvidencePresentation
+
+
+SYNTHESIZED_ANSWER_CAPTION = "Synthesized from cited VDR evidence."
+UNVERIFIED_TABLE_CAPTION = (
+    "The table above was synthesized from retrieved evidence and was not "
+    "independently verified cell by cell."
+)
+VERIFIED_TABLE_AVAILABLE_CAPTION = (
+    "Independently verified source figures are available under Structured."
+)
+EVIDENCE_HARD_MAX_CHARS = 1800
+EVIDENCE_TRUNCATION_CAPTION = (
+    "Full extracted passage is available under Raw retrieval."
+)
+FRAGMENTED_LAYOUT_NOTICE = (
+    "The original source layout was not preserved in this passage. "
+    "Review Raw retrieval for the exact extraction."
+)
+
+_MARKDOWN_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+_MARKDOWN_DELIMITER_CELL_RE = re.compile(r"^:?-{3,}:?$")
+_LIST_LINE_RE = re.compile(
+    r"^[ \t]*(?:[-*•◦–—]|\d+[.)]|[A-Za-z][.)])(?:[ \t]+|$)",
+    re.MULTILINE,
+)
+_NUMERIC_TOKEN_RE = re.compile(
+    r"(?<!\w)[+-]?(?:\d[\d.,]*)(?:\s?(?:%|x))?(?!\w)",
+    re.IGNORECASE,
+)
+_PERIOD_MARKER_RE = re.compile(
+    r"(?<!\w)(?:(?:FY|Q|H)\s*\d{2,4}|(?:19|20)\d{2}[ABEF]?|LTM|NTM)"
+    r"(?!\w)",
+    re.IGNORECASE,
+)
+_SENTENCE_BOUNDARY_RE = re.compile(r"[.!?](?:[\"'”’\)\]]*)?(?=\s|$)")
 
 
 def build_assistant_message(answer: VDRAnswer) -> dict:
@@ -21,6 +59,101 @@ def build_assistant_message(answer: VDRAnswer) -> dict:
         "content": answer.answer,
         "vdr_answer": answer.model_dump(mode="json"),
     }
+
+
+def _markdown_row_cells(line: str) -> list[str] | None:
+    """Return cells from one plausible pipe-delimited Markdown row."""
+
+    stripped = line.strip()
+    if "|" not in stripped or "<" in stripped or ">" in stripped:
+        return None
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    cells = [cell.strip() for cell in stripped.split("|")]
+    if len(cells) < 2 or any(not cell for cell in cells):
+        return None
+    return cells
+
+
+def answer_contains_markdown_table(answer: str) -> bool:
+    """Detect a Markdown table while ignoring fenced code and pipe prose."""
+
+    if not isinstance(answer, str):
+        raise TypeError("answer must be a string")
+
+    visible_lines: list[str | None] = []
+    fence_character: str | None = None
+    fence_length = 0
+
+    for line in answer.splitlines():
+        fence_match = _MARKDOWN_FENCE_RE.match(line)
+        if fence_character is None and fence_match is not None:
+            marker = fence_match.group(1)
+            fence_character = marker[0]
+            fence_length = len(marker)
+            visible_lines.append(None)
+            continue
+        if fence_character is not None:
+            stripped = line.lstrip()
+            if stripped.startswith(fence_character * fence_length):
+                fence_character = None
+                fence_length = 0
+            visible_lines.append(None)
+            continue
+        visible_lines.append(line)
+
+    for header_line, delimiter_line in zip(
+        visible_lines,
+        visible_lines[1:],
+    ):
+        if header_line is None or delimiter_line is None:
+            continue
+        header_cells = _markdown_row_cells(header_line)
+        delimiter_cells = _markdown_row_cells(delimiter_line)
+        if header_cells is None or delimiter_cells is None:
+            continue
+        if len(header_cells) != len(delimiter_cells):
+            continue
+        if all(
+            _MARKDOWN_DELIMITER_CELL_RE.fullmatch(cell) is not None
+            for cell in header_cells
+        ):
+            continue
+        if all(
+            _MARKDOWN_DELIMITER_CELL_RE.fullmatch(cell) is not None
+            for cell in delimiter_cells
+        ):
+            return True
+
+    return False
+
+
+def has_verified_table(sources: list[SourceReference]) -> bool:
+    """Return whether any source contains an independently verified table."""
+
+    return any(
+        presentation.tables
+        for source in sources
+        for presentation in source.presentations
+    )
+
+
+def render_answer_trust_caption(answer: VDRAnswer) -> None:
+    """Render synthesis and table-verification disclosures when applicable."""
+
+    if answer.status != "success" or not answer.source_files:
+        return
+
+    st.caption(SYNTHESIZED_ANSWER_CAPTION)
+    if not answer_contains_markdown_table(answer.answer):
+        return
+
+    if has_verified_table(answer.sources):
+        st.caption(VERIFIED_TABLE_AVAILABLE_CAPTION)
+    else:
+        st.caption(UNVERIFIED_TABLE_CAPTION)
 
 
 def _has_structured_content(
@@ -80,55 +213,327 @@ def _render_structured_evidence(
             st.table(table_data, hide_index=True)
 
 
-def _render_evidence_views(
-    evidence: list[str],
-    presentations: list[VerifiedEvidencePresentation],
-) -> None:
-    """Render structured, readable, and raw evidence views safely."""
+def _nonempty_lines(text: str) -> list[str]:
+    """Return nonblank lines without changing their content."""
 
-    raw_excerpts = [
-        truncate_evidence_excerpt(passage)
-        for passage in evidence[:MAX_VISIBLE_EVIDENCE_PASSAGES]
+    return [line for line in text.splitlines() if line.strip()]
+
+
+def _is_numeric_dense(line: str) -> bool:
+    """Return whether a line looks value-oriented rather than prose-like."""
+
+    return (
+        len(_NUMERIC_TOKEN_RE.findall(line)) >= 2
+        or len(_PERIOD_MARKER_RE.findall(line)) >= 2
+    )
+
+
+def is_table_like_evidence(text: str) -> bool:
+    """Conservatively identify repeated period/value extraction fragments."""
+
+    lines = _nonempty_lines(text)
+    if len(lines) < 3:
+        return False
+
+    list_line_count = sum(
+        _LIST_LINE_RE.match(line) is not None for line in lines
+    )
+    if list_line_count:
+        return False
+
+    numeric_counts = [len(_NUMERIC_TOKEN_RE.findall(line)) for line in lines]
+    numeric_line_count = sum(count > 0 for count in numeric_counts)
+    period_count = sum(
+        len(_PERIOD_MARKER_RE.findall(line)) for line in lines
+    )
+    short_line_count = sum(len(line.split()) <= 3 for line in lines)
+
+    return (
+        period_count >= 3
+        or (
+            numeric_line_count * 5 >= len(lines) * 2
+            and short_line_count * 4 >= len(lines) * 3
+        )
+        or sum(count >= 2 for count in numeric_counts) >= 2
+    )
+
+
+def is_severely_fragmented(text: str) -> bool:
+    """Identify ambiguous runs dominated by one- or two-word lines."""
+
+    lines = _nonempty_lines(text)
+    if len(lines) < 6:
+        return False
+    if any(_LIST_LINE_RE.match(line) is not None for line in lines):
+        return False
+
+    short_line_count = sum(len(line.split()) <= 2 for line in lines)
+    return short_line_count * 4 >= len(lines) * 3
+
+
+def _looks_like_heading(line: str) -> bool:
+    """Return whether a short line is plausibly a standalone heading."""
+
+    words = re.findall(r"[^\W\d_]+", line, flags=re.UNICODE)
+    return bool(words) and len(words) <= 6 and all(
+        word[0].isupper() for word in words
+    )
+
+
+def _can_join_soft_wrap(current: str, following: str) -> bool:
+    """Return whether two adjacent lines are unmistakably wrapped prose."""
+
+    current_stripped = current.strip()
+    following_stripped = following.strip()
+    following_letters = re.search(r"[^\W\d_]", following_stripped, re.UNICODE)
+    if not current_stripped or not following_stripped:
+        return False
+    if _LIST_LINE_RE.match(current) or _LIST_LINE_RE.match(following):
+        return False
+    if _is_numeric_dense(current) or _is_numeric_dense(following):
+        return False
+    if _PERIOD_MARKER_RE.search(current) or _PERIOD_MARKER_RE.search(following):
+        return False
+    if (
+        "\t" in current
+        or "\t" in following
+        or "|" in current
+        or "|" in following
+    ):
+        return False
+    if _SENTENCE_BOUNDARY_RE.search(current_stripped):
+        return False
+    if len(current_stripped.split()) < 4 or _looks_like_heading(
+        current_stripped
+    ):
+        return False
+    if following_letters is None or not following_letters.group(0).islower():
+        return False
+    return True
+
+
+def reflow_clear_soft_wraps(text: str) -> str:
+    """Join only clear lowercase prose continuations within a paragraph."""
+
+    rendered_lines: list[str] = []
+    in_list_block = False
+    for line in text.split("\n"):
+        if not line.strip():
+            rendered_lines.append(line)
+            in_list_block = False
+            continue
+        if _LIST_LINE_RE.match(line):
+            in_list_block = True
+        if (
+            rendered_lines
+            and not in_list_block
+            and _can_join_soft_wrap(rendered_lines[-1], line)
+        ):
+            rendered_lines[-1] = (
+                f"{rendered_lines[-1].rstrip()} {line.lstrip()}"
+            )
+        else:
+            rendered_lines.append(line)
+    return "\n".join(rendered_lines)
+
+
+def _forward_boundary(
+    text: str,
+    *,
+    target_chars: int,
+    content_limit: int,
+) -> int | None:
+    """Find the preferred safe boundary after the readability target."""
+
+    list_starts = [
+        match.start()
+        for match in _LIST_LINE_RE.finditer(text)
     ]
-    has_structured_content = _has_structured_content(presentations)
-    tab_labels = ["Readable text", "Raw text"]
+    paragraph_start = text.rfind("\n\n", 0, target_chars) + 2
+    current_list_starts = [
+        start
+        for start in list_starts
+        if paragraph_start <= start <= target_chars
+    ]
+    if current_list_starts:
+        next_list_starts = [
+            start
+            for start in list_starts
+            if target_chars < start <= content_limit
+        ]
+        if next_list_starts:
+            return next_list_starts[0]
+
+    search_region = text[target_chars:content_limit]
+    paragraph_match = re.search(r"\n[ \t]*\n", search_region)
+    if paragraph_match is not None:
+        return target_chars + paragraph_match.start()
+
+    sentence_match = _SENTENCE_BOUNDARY_RE.search(search_region)
+    if sentence_match is not None:
+        return target_chars + sentence_match.end()
+
+    line_offset = search_region.find("\n")
+    if line_offset >= 0:
+        return target_chars + line_offset
+    return None
+
+
+def _preceding_boundary(text: str, *, target_chars: int) -> int | None:
+    """Find the nearest useful boundary before the readability target."""
+
+    candidates: list[int] = []
+    candidates.extend(
+        match.start()
+        for match in _LIST_LINE_RE.finditer(text)
+        if 0 < match.start() <= target_chars
+    )
+    candidates.extend(
+        match.start()
+        for match in re.finditer(r"\n[ \t]*\n", text[: target_chars + 1])
+        if match.start() > 0
+    )
+    candidates.extend(
+        match.end()
+        for match in _SENTENCE_BOUNDARY_RE.finditer(text[:target_chars])
+    )
+    candidates.extend(
+        match.start()
+        for match in re.finditer("\n", text[:target_chars])
+        if match.start() > 0
+    )
+    return max(candidates, default=None)
+
+
+def truncate_evidence_at_boundary(
+    text: str,
+    target_chars: int = MAX_VISIBLE_EVIDENCE_CHARS,
+    hard_max_chars: int = EVIDENCE_HARD_MAX_CHARS,
+) -> tuple[str, bool]:
+    """Return a bounded excerpt ending at a meaningful display boundary."""
+
+    if target_chars < 0:
+        raise ValueError("target_chars must be non-negative")
+    if hard_max_chars <= 0 or hard_max_chars < target_chars:
+        raise ValueError("hard_max_chars must be at least target_chars")
+    if len(text) <= target_chars:
+        return text, False
+
+    content_limit = hard_max_chars - 1
+    boundary = _forward_boundary(
+        text,
+        target_chars=target_chars,
+        content_limit=min(content_limit, len(text)),
+    )
+    if boundary is None and len(text) <= hard_max_chars:
+        return text, False
+    if boundary is None:
+        boundary = _preceding_boundary(text, target_chars=target_chars)
+    if boundary is None:
+        boundary = text.rfind(" ", 0, content_limit + 1)
+    if boundary is None or boundary <= 0:
+        boundary = content_limit
+
+    excerpt = text[: min(boundary, content_limit)].rstrip()
+    if not excerpt:
+        excerpt = text[:content_limit]
+    return f"{excerpt}…", True
+
+
+def render_evidence_passage(
+    passage: str,
+    *,
+    label: str | None,
+) -> None:
+    """Render one cleaned, bounded passage without semantic rewriting."""
+
+    cleaned_passage = clean_evidence_text(passage)
+    if not cleaned_passage:
+        return
+
+    is_fragmented = is_table_like_evidence(
+        cleaned_passage
+    ) or is_severely_fragmented(cleaned_passage)
+    display_text = (
+        cleaned_passage
+        if is_fragmented
+        else reflow_clear_soft_wraps(cleaned_passage)
+    )
+    excerpt, was_truncated = truncate_evidence_at_boundary(display_text)
+
+    if label is not None:
+        st.caption(label)
+    if is_fragmented:
+        st.caption(FRAGMENTED_LAYOUT_NOTICE)
+        st.code(excerpt, language=None, wrap_lines=True)
+    else:
+        st.text(excerpt, width="stretch")
+    if was_truncated:
+        st.caption(EVIDENCE_TRUNCATION_CAPTION)
+
+
+def render_evidence_tab(source: SourceReference) -> None:
+    """Render up to two ranked passages with restrained hierarchy."""
+
+    passages = source.evidence[:MAX_VISIBLE_EVIDENCE_PASSAGES]
+    if len(passages) == 1:
+        render_evidence_passage(
+            passages[0],
+            label="Best supporting passage",
+        )
+        return
+    if len(passages) < 2:
+        return
+
+    labels = ["Best supporting passage", "Additional retrieved context"]
+    passage_tabs = st.tabs(labels, default=labels[0])
+    for passage_tab, passage in zip(passage_tabs, passages):
+        with passage_tab:
+            render_evidence_passage(passage, label=None)
+
+
+def render_raw_retrieval(source: SourceReference) -> None:
+    """Render exact stored File Search strings for auditability."""
+
+    for index, passage in enumerate(
+        source.evidence[:MAX_VISIBLE_EVIDENCE_PASSAGES],
+        start=1,
+    ):
+        st.caption(f"Raw passage {index}")
+        st.code(passage, language=None, wrap_lines=False)
+
+
+def _render_evidence_views(source: SourceReference) -> None:
+    """Render evidence, optional structure, and raw retrieval safely."""
+
+    has_structured_content = _has_structured_content(source.presentations)
+    tab_labels = ["Evidence"]
     if has_structured_content:
-        tab_labels.insert(0, "Structured view")
+        tab_labels.append("Structured")
+    tab_labels.append("Raw retrieval")
     tabs = st.tabs(tab_labels, default=tab_labels[0])
 
     if has_structured_content:
-        structured_tab, readable_tab, raw_tab = tabs
-        with structured_tab:
-            _render_structured_evidence(presentations)
+        evidence_tab, structured_tab, raw_tab = tabs
     else:
-        readable_tab, raw_tab = tabs
+        evidence_tab, raw_tab = tabs
 
-    with readable_tab:
-        st.caption(
-            "Formatting cleanup only; document wording and values are "
-            "unchanged."
-        )
-        for index, raw_excerpt in enumerate(raw_excerpts, start=1):
-            cleaned_excerpt = clean_evidence_text(raw_excerpt)
-            if not cleaned_excerpt:
-                continue
-            st.caption(f"Retrieved passage {index}")
-            st.text(cleaned_excerpt, width="stretch")
+    with evidence_tab:
+        render_evidence_tab(source)
+
+    if has_structured_content:
+        with structured_tab:
+            _render_structured_evidence(source.presentations)
 
     with raw_tab:
-        for index, raw_excerpt in enumerate(raw_excerpts, start=1):
-            st.caption(f"Retrieved passage {index}")
-            st.code(
-                raw_excerpt,
-                language=None,
-                wrap_lines=False,
-            )
+        render_raw_retrieval(source)
 
 
 def _render_answer_content(answer: VDRAnswer) -> None:
     """Render answer content without creating a chat-message container."""
 
     st.markdown(answer.answer)
+    render_answer_trust_caption(answer)
 
     if answer.verified_quotes:
         st.markdown("**Verified quotations**")
@@ -149,8 +554,7 @@ def _render_answer_content(answer: VDRAnswer) -> None:
                 f"Retrieved evidence — {source.display_name}"
             ):
                 _render_evidence_views(
-                    source.evidence,
-                    source.presentations,
+                    source,
                 )
     elif answer.source_files:
         st.markdown("**Sources**")

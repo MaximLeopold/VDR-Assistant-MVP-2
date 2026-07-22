@@ -25,8 +25,8 @@ MAX_PARALLEL_FIELD_CHARS = 200
 
 _FINANCIAL_CATEGORY_PATTERN = (
     r"(?:"
-    r"(?:19|20)\d{2}(?:PF|[AEF])?"
-    r"|FY[ \t]*(?:(?:19|20)\d{2}|\d{2})(?:PF|[AEF])?"
+    r"(?:19|20)\d{2}(?:PF|[ABEF])?"
+    r"|FY[ \t]*(?:(?:19|20)\d{2}|\d{2})(?:PF|[ABEF])?"
     r"|(?:Q[1-4]|H[12])[ \t]+(?:(?:19|20)\d{2}|\d{2})(?:PF|[AEF])?"
     r"|LTM|NTM|Actual|Estimate|Forecast|Budget|Plan"
     r"|Base|Upside|Downside"

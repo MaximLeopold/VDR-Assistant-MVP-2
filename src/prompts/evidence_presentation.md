@@ -20,7 +20,7 @@ For every table candidate:
 
 For every parallel-series candidate:
 
-- Support only explicit financial period or scenario categories such as 2024A, 2025E, FY25, Q1 2027, H1 2026, LTM, NTM, Budget, Base, Upside, or Downside.
+- Support only explicit financial period or scenario categories such as 2024A, 2025B, 2025E, FY25, FY26B, Q1 2027, H1 2026, LTM, NTM, Budget, Base, Upside, or Downside. Preserve compact B suffixes exactly as Budget markers.
 - Require one explicit category label and complete category sequence on one logical line.
 - Require every series to have an explicit label and its complete value sequence on its own logical line.
 - Copy category labels, categories, series labels, values, units, markers, symbols, and punctuation exactly and preserve source order.

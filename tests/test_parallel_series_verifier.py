@@ -74,6 +74,12 @@ def verify(
     "categories",
     [
         ["2024A", "2025E", "2026F"],
+        ["2026B", "2027B", "2028E"],
+        ["FY26B", "FY27E", "FY28E"],
+        ["FY2026B", "FY2027E", "FY2028E"],
+        ["2025A", "2026B", "2027E"],
+        ["2024A", "2025PF", "2026F"],
+        ["Actual", "Budget", "Forecast"],
         ["FY25", "FY2026", "FY27E"],
         ["Q1 27", "Q2 27", "Q3 27"],
         ["H1 2026", "H2 2026"],
@@ -127,6 +133,50 @@ def test_revenue_and_costs_convert_to_exact_verified_table() -> None:
         ["2026E", "13,533", "9,100"],
     ]
     assert match.table.source_texts == passage.splitlines()
+
+
+def test_clean_budget_horizontal_table_verifies_without_normalization() -> None:
+    passage = (
+        "Period 2026B 2027E 2028E 2029E 2030E\n"
+        "Revenue 10.1 12.3 14.6 16.0 18.4\n"
+        "Costs 7.2 8.5 9.4 10.1 11.3"
+    )
+    categories = ["2026B", "2027E", "2028E", "2029E", "2030E"]
+    proposed = candidate(
+        passage,
+        categories=categories,
+        series_specs=[
+            ("Revenue", ["10.1", "12.3", "14.6", "16.0", "18.4"], None),
+            ("Costs", ["7.2", "8.5", "9.4", "10.1", "11.3"], None),
+        ],
+    )
+
+    match = verify(passage, proposed)
+
+    assert match is not None
+    assert [row[0] for row in match.table.rows] == categories
+    assert match.table.rows[0] == ["2026B", "10.1", "7.2"]
+    assert "2026 Budget" not in str(match.table.rows)
+
+
+def test_interleaved_budget_structure_without_category_label_still_rejects() -> None:
+    passage = (
+        "2026B 2027E 2028E 2029E 2030E\n"
+        "8.1%\n"
+        "(0.1%)\n"
+        "(9.4%)\n"
+        "FTEs by division\n"
+        "Management 3.0 3.0 3.0 3.0 3.0"
+    )
+    proposed = candidate(
+        passage,
+        categories=["2026B", "2027E", "2028E", "2029E", "2030E"],
+        series_specs=[
+            ("Management", ["3.0", "3.0", "3.0", "3.0", "3.0"], None)
+        ],
+    )
+
+    assert verify(passage, proposed) is None
 
 
 def test_explicit_mixed_units_are_preserved_in_column_labels() -> None:
@@ -215,6 +265,10 @@ def test_fifteen_periods_five_series_and_seventy_five_points_verify() -> None:
         ("Period 2024A 2024A\nRevenue 10 12", ["2024A", "2024A"]),
         ("Period 2024A 2025E\nRevenue 10 12", ["2025E", "2024A"]),
         ("Period 2024A 2025E\nRevenue 10 12", ["2024", "2025"]),
+        (
+            "Period 2026 Budget 2027E\nRevenue 10 12",
+            ["2026 Budget", "2027E"],
+        ),
     ],
 )
 def test_generic_duplicate_reordered_or_normalized_categories_reject(

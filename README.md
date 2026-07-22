@@ -12,40 +12,50 @@ The current MVP supports one active VDR project at a time and one OpenAI vector 
   when the active case manifest is configured
 - Display concise, source-verified quotations beneath successful answers
 - Expand retrieved File Search passages beneath their cited sources in chat,
-  with Readable and Raw text views
-- Display an optional Structured view for locally verified key figures,
+  with an Evidence view and a Raw retrieval audit view
+- Display an optional Structured tab for locally verified key figures,
   row-oriented evidence tables, and explicit horizontal financial series
 - Return a fallback response when information is not found in the VDR documents
 - Maintain short conversation history for follow-up questions
 - Reset the chat session from the sidebar
 
-Each cited source displays up to two retrieved evidence excerpts, ordered by
-the relevance score returned by File Search and capped in length for
-readability. Full retrieved passages remain available internally, while the
-scores themselves are not displayed. Quote candidates are selected from cited
-retrieved evidence, and every displayed quotation is checked locally against
-the corresponding source text. Unverifiable candidates are omitted, and quote
-selection failure does not invalidate an otherwise supported answer. This
-verification establishes that the displayed wording occurs in retrieved
-evidence; it does not prove the broader answer is correct. Broader retrieved
-evidence remains available in expanders, while the sidebar stays citation-only.
+Successful main answers are synthesized from cited VDR evidence. A Markdown
+table in the main answer is not automatically verified cell by cell. The UI
+discloses this distinction and separately identifies when independently
+verified source figures are available under Structured.
+
+Each cited source displays up to two retrieved passages, ordered by the
+relevance score returned by File Search. Evidence is the default business-user
+view. A single passage appears directly; when a second passage is available,
+the best-ranked passage is selected first and the second remains available as
+additional retrieved context. Evidence cleans display whitespace, applies only
+conservative soft-wrap reflow, and uses boundary-aware excerpts with a
+1,800-character hard maximum. Ambiguous fragmented or table-like extractions
+remain preformatted and carry a layout notice rather than being reconstructed.
+Raw retrieval preserves the complete exact stored File Search strings for the
+same first two passages as an audit fallback. Scores and internal identifiers
+are not displayed. Table-like content is converted to a table only when it is
+independently verified for Structured; otherwise Structured remains absent.
+
+Quote candidates are selected from cited retrieved evidence, and every
+displayed quotation is checked locally against the corresponding source text.
+Unverifiable candidates are omitted, and quote selection failure does not
+invalidate an otherwise supported answer. This verification establishes that
+the displayed wording occurs in retrieved evidence; it does not prove the
+broader answer is correct. The sidebar stays citation-only.
 When a retrieved passage supports locally verified key figures, a row-oriented
 table, or explicit horizontal financial series, its evidence expander also
 provides a Structured view. Horizontal series are converted into the existing
 row-oriented verified table only after the category and every value sequence
 have been matched locally to distinct, contiguous source lines. Values and
-financial period or scenario markers remain exact strings. Ambiguous,
-incomplete, or fully flattened horizontal structures are omitted.
+financial period or scenario markers, including compact Budget suffix `B`,
+remain exact strings. Ambiguous, interleaved, incomplete, competing, or fully
+flattened horizontal structures are omitted.
 Displayed labels, values, periods, units, headers, and cells remain exact source
 strings. Ambiguous relationships are omitted, and the Structured view does not
-claim to reproduce the original PDF or slide layout. Readable and Raw text
-views remain available alongside it. Without verified structured content, the
-existing Readable and Raw tabs are unchanged. The Readable view applies
-deterministic whitespace and line-layout cleanup only; it does not change
-document wording, values, punctuation, capitalization, or ordering. The Raw
-view retains the original retrieved passage for the same bounded excerpt.
-No charts are generated from structured evidence yet. Chart-compatible numeric
-parsing and chart generation remain deferred to Phase 3.
+claim to reproduce the original PDF or slide layout. Phase 2 intentionally does
+not reconstruct every source table. No charts are generated yet; future chart
+construction must consume verified tables only.
 Retrieval and ranking tuning remain outside Milestone 1C.
 
 ## Fallback behavior

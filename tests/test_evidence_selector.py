@@ -253,6 +253,11 @@ def test_selector_uses_one_raw_only_bounded_structured_request(monkeypatch) -> N
     "text",
     [
         "Period 2024A 2025E 2026F\nRevenue 10 12 14",
+        "Period 2026B 2027E 2028E\nRevenue 10 12 14",
+        "Period FY26B FY27E FY28E\nRevenue 10 12 14",
+        "Period FY2026B FY2027E FY2028E\nRevenue 10 12 14",
+        "Period 2025A 2026B 2027E\nRevenue 10 12 14",
+        "Scenario Actual Budget Forecast\nRevenue 10 12 14",
         "Period FY25 FY26 FY27\nEBITDA 5.2 6.1 7.4",
         "Period Q1 27 Q2 27 Q3 27\nRevenue 10 12 14",
         "Period H1 2025 H2 2025\nRevenue 10 12",
@@ -272,6 +277,9 @@ def test_prompt_requests_fail_closed_parallel_series_without_charts() -> None:
     assert "flattened onto one line" in prompt
     assert "Do not return an incomplete table" in prompt
     assert "chart specification" in prompt
+    assert "2025B" in prompt
+    assert "FY26B" in prompt
+    assert "Budget markers" in prompt
 
 
 def test_empty_scope_does_not_create_client(monkeypatch) -> None:

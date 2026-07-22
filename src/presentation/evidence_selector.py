@@ -56,8 +56,8 @@ _YEAR_OR_DATE_RE = re.compile(
 )
 _FINANCIAL_CATEGORY_RE = re.compile(
     r"(?<![\w])(?:"
-    r"(?:19|20)\d{2}(?:PF|[AEF])?"
-    r"|FY[ \t]*(?:\d{2}|(?:19|20)\d{2})(?:PF|[AEF])?"
+    r"(?:19|20)\d{2}(?:PF|[ABEF])?"
+    r"|FY[ \t]*(?:\d{2}|(?:19|20)\d{2})(?:PF|[ABEF])?"
     r"|(?:Q[1-4]|H[12])[ \t]+(?:\d{2}|(?:19|20)\d{2})(?:PF|[AEF])?"
     r"|LTM|NTM|Actual|Estimate|Forecast|Budget|Plan"
     r"|Base|Upside|Downside"
