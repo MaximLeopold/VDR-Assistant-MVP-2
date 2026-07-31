@@ -22,6 +22,8 @@ store.
 - Reset the chat session from the sidebar
 - Select one prepared case when the application starts
 - Close the active case and safely return to case selection
+- Prepare an unregistered new case by scanning a local VDR, creating its
+  manifest, and associating a manually created empty OpenAI vector store
 
 Successful main answers are synthesized from cited VDR evidence. A Markdown
 table in the main answer is not automatically verified cell by cell. The UI
@@ -148,10 +150,25 @@ Do not commit `.env` to GitHub.
 ### 6. Run the Streamlit app
 
 ```powershell
-streamlit run app/main.py
+streamlit run app/main.py --server.address 127.0.0.1
 ```
 
-The app should open in the browser.
+The app should open in the browser and remain bound to the local machine.
+
+## Phase 1 new-case preparation
+
+From the startup case selector, choose **Prepare new case** to:
+
+1. enter an existing local VDR folder and a non-confidential technical case
+   ID;
+2. run and review a read-only file-metadata scan;
+3. explicitly create the local manifest; and
+4. validate and associate an empty vector store that you created manually in
+   the OpenAI Platform.
+
+Phase 1 does not upload documents and does not add the case to
+`cases.local.json`. The incomplete case therefore remains unavailable in
+normal case selection. Bulk ingestion and registration belong to Phase 2.
 
 ## Project structure
 

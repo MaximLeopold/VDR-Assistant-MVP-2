@@ -32,6 +32,14 @@ from src.ui.case_selection import (
     get_active_case,
     initialize_case_session,
     render_case_selection,
+    render_prepare_new_case_action,
+)
+from src.ui.new_case_setup import (
+    clear_new_case_setup_session,
+    initialize_new_case_setup_session,
+    is_new_case_setup_active,
+    render_new_case_setup,
+    start_new_case_setup,
 )
 from src.ui.sidebar import render_sidebar
 from src.ui.source_panel import render_source_panel
@@ -46,6 +54,7 @@ st.title(APP_TITLE)
 st.caption("Ask questions against one prepared VDR case at a time.")
 
 initialize_case_session(st.session_state)
+initialize_new_case_setup_session(st.session_state)
 active_case = get_active_case(st.session_state)
 
 
@@ -59,11 +68,26 @@ if active_case is None:
         st.error(str(error))
         st.stop()
 
+    if is_new_case_setup_active(st.session_state):
+        render_new_case_setup(
+            st.session_state,
+            prepared_cases,
+            repository_root=PROJECT_ROOT,
+        )
+        st.stop()
+
     selected_case = render_case_selection(prepared_cases)
     if selected_case is not None:
         activate_case(st.session_state, selected_case)
         st.rerun()
+    if render_prepare_new_case_action():
+        start_new_case_setup(st.session_state)
+        st.rerun()
     st.stop()
+
+
+if is_new_case_setup_active(st.session_state):
+    clear_new_case_setup_session(st.session_state)
 
 
 # The OpenAI API key must exist before the app can do anything useful.

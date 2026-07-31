@@ -6,6 +6,10 @@
 # Local prepared-case registry (contains machine-specific VDR paths)
 cases.local.json
 
+# Local manifests created beside a VDR folder
+**/VDR Assistant/manifest.json
+**/VDR Assistant/manifest.backup.json
+
 # Python
 __pycache__/
 *.py[cod]

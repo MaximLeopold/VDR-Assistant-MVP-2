@@ -15,6 +15,7 @@ ACTIVE_CASE_KEY = "active_case"
 MESSAGES_KEY = "messages"
 LAST_ANSWER_KEY = "last_answer"
 CASE_SELECTOR_KEY = "case_selector"
+PREPARE_NEW_CASE_BUTTON_KEY = "prepare_new_case"
 
 
 class ActiveCaseError(Exception):
@@ -113,3 +114,17 @@ def render_case_selection(cases: list[PreparedCase]) -> PreparedCase | None:
         return cases_by_id[selected_case_id]
 
     return None
+
+
+def render_prepare_new_case_action() -> bool:
+    """Render the secondary startup action for an unregistered new case."""
+
+    st.divider()
+    st.caption(
+        "Prepare a new local case before it is uploaded and added to the "
+        "prepared-case list."
+    )
+    return st.button(
+        "Prepare new case",
+        key=PREPARE_NEW_CASE_BUTTON_KEY,
+    )

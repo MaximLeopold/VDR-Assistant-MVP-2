@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from openai import OpenAI
 
@@ -15,10 +16,15 @@ from src.ingestion.manifest_persistence import (
     save_manifest,
 )
 from src.ingestion.vector_store_manager import (
+    InvalidVectorStoreIdError,
     create_vector_store,
+    list_vector_store_files,
     normalize_vector_store_id,
     retrieve_vector_store,
 )
+
+if TYPE_CHECKING:
+    from src.config.case_registry import PreparedCase
 
 
 class CaseVectorStoreError(Exception):
@@ -31,6 +37,14 @@ class CaseVectorStoreConflictError(CaseVectorStoreError):
 
 class NoCaseVectorStoreError(CaseVectorStoreError):
     """Raised when a case has no ID and creation was not permitted."""
+
+
+class CaseVectorStoreNotEmptyError(CaseVectorStoreError):
+    """Raised when normal new-case setup receives a populated store."""
+
+
+class CaseVectorStoreAlreadyUsedError(CaseVectorStoreError):
+    """Raised when a registered case already owns the supplied store."""
 
 
 class CaseVectorStorePersistenceError(CaseVectorStoreError):
@@ -87,6 +101,15 @@ def _remote_name(vector_store: object) -> str | None:
     return name if isinstance(name, str) and name else None
 
 
+def mask_vector_store_id(vector_store_id: str) -> str:
+    """Mask an OpenAI vector-store ID for routine status display."""
+
+    normalized = normalize_vector_store_id(vector_store_id)
+    if len(normalized) <= 9:
+        return "*" * len(normalized)
+    return f"{normalized[:6]}...{normalized[-3:]}"
+
+
 def _normalized_manifest_id(manifest: VDRManifest) -> str | None:
     if manifest.vector_store_id is None:
         return None
@@ -141,6 +164,89 @@ def adopt_case_vector_store(
 
     return CaseVectorStoreResult(
         manifest=manifest,
+        vector_store_id=candidate_id,
+        action="adopted",
+        remote_name=_remote_name(remote),
+    )
+
+
+def associate_empty_case_vector_store(
+    client: OpenAI,
+    vdr_folder: str | Path,
+    vector_store_id: str,
+    *,
+    registered_cases: Sequence["PreparedCase"],
+) -> CaseVectorStoreResult:
+    """Associate one accessible, empty, otherwise-unused vector store.
+
+    This is the strict normal path for a new unregistered case. It performs
+    read-only OpenAI validation and one atomic local manifest save. Legacy
+    populated-store adoption remains the responsibility of
+    :func:`adopt_case_vector_store`.
+    """
+
+    manifest = load_manifest(vdr_folder)
+    candidate_id = normalize_vector_store_id(vector_store_id)
+    manifest_id = _normalized_manifest_id(manifest)
+    _reject_conflict(manifest_id, candidate_id)
+
+    for prepared_case in registered_cases:
+        registered_id = prepared_case.vector_store_id
+        if registered_id is None and prepared_case.manifest is not None:
+            registered_id = prepared_case.manifest.vector_store_id
+        if registered_id is None:
+            continue
+        try:
+            normalized_registered_id = normalize_vector_store_id(registered_id)
+        except InvalidVectorStoreIdError:
+            continue
+        if normalized_registered_id == candidate_id:
+            raise CaseVectorStoreAlreadyUsedError(
+                "This vector store is already associated with another "
+                "prepared case."
+            )
+
+    if manifest_id == candidate_id:
+        return CaseVectorStoreResult(
+            manifest=manifest,
+            vector_store_id=candidate_id,
+            action="reused",
+            remote_name=None,
+        )
+
+    remote = retrieve_vector_store(client, candidate_id)
+    attachments = list_vector_store_files(client, candidate_id)
+    if attachments:
+        raise CaseVectorStoreNotEmptyError(
+            "The selected vector store already contains files. Create a new "
+            "empty vector store for this case."
+        )
+
+    # Remote validation can take time. Reload before saving so a concurrent
+    # local association cannot be overwritten with a stale manifest object.
+    manifest = load_manifest(vdr_folder)
+    manifest_id = _normalized_manifest_id(manifest)
+    _reject_conflict(manifest_id, candidate_id)
+    if manifest_id == candidate_id:
+        return CaseVectorStoreResult(
+            manifest=manifest,
+            vector_store_id=candidate_id,
+            action="reused",
+            remote_name=_remote_name(remote),
+        )
+
+    manifest.vector_store_id = candidate_id
+    try:
+        save_manifest(manifest, vdr_folder)
+    except ManifestPersistenceError as error:
+        raise CaseVectorStorePersistenceError(
+            vector_store_id=candidate_id,
+            original_save_error=error,
+        ) from error
+    persisted = load_manifest(vdr_folder)
+
+    return CaseVectorStoreResult(
+        manifest=persisted,
         vector_store_id=candidate_id,
         action="adopted",
         remote_name=_remote_name(remote),
