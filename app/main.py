@@ -13,17 +13,25 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 from src.chains.qa_chain import run_qa_chain
+from src.config.case_registry import CaseRegistryError, load_case_registry
 from src.config.constants import APP_TITLE
 from src.config.settings import (
-    VDR_FOLDER,
-    VECTOR_STORE_ID,
+    CASE_REGISTRY_PATH,
     validate_settings,
 )
-from src.ingestion.active_manifest import load_active_manifest
 from src.ui.chat import (
     build_assistant_message,
     render_answer,
     render_chat_history,
+)
+from src.ui.case_selection import (
+    ActiveCaseError,
+    activate_case,
+    active_case_qa_inputs,
+    close_active_case,
+    get_active_case,
+    initialize_case_session,
+    render_case_selection,
 )
 from src.ui.sidebar import render_sidebar
 from src.ui.source_panel import render_source_panel
@@ -35,48 +43,56 @@ st.set_page_config(
 )
 
 st.title(APP_TITLE)
-st.caption("Ask questions against the active VDR vector store.")
+st.caption("Ask questions against one prepared VDR case at a time.")
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-if "last_answer" not in st.session_state:
-    st.session_state.last_answer = None
+initialize_case_session(st.session_state)
+active_case = get_active_case(st.session_state)
 
 
-# The OpenAI API key must exist before the app can do anything useful.
-# The vector store ID can come from .env or from the sidebar input.
-missing_settings = validate_settings()
-blocking_missing_settings = [
-    setting
-    for setting in missing_settings
-    if setting != "VECTOR_STORE_ID"
-]
+if active_case is None:
+    try:
+        prepared_cases = load_case_registry(
+            CASE_REGISTRY_PATH,
+            base_dir=PROJECT_ROOT,
+        )
+    except CaseRegistryError as error:
+        st.error(str(error))
+        st.stop()
 
-if blocking_missing_settings:
-    st.error(
-        "Missing required environment variables:\n\n"
-        + "\n".join(blocking_missing_settings)
-    )
+    selected_case = render_case_selection(prepared_cases)
+    if selected_case is not None:
+        activate_case(st.session_state, selected_case)
+        st.rerun()
     st.stop()
 
 
-mode, active_vector_store, reset_chat = render_sidebar(VECTOR_STORE_ID)
+# The OpenAI API key must exist before the app can do anything useful.
+missing_settings = validate_settings()
+
+mode, reset_chat, close_case = render_sidebar(active_case.display_name)
+
+if close_case:
+    close_active_case(st.session_state)
+    st.rerun()
+
+if not active_case.is_ready:
+    st.error(
+        f"{active_case.display_name} cannot be opened: "
+        f"{active_case.error or 'The case configuration is incomplete.'}"
+    )
+    st.stop()
+
+if missing_settings:
+    st.error(
+        "Missing required environment variables:\n\n"
+        + "\n".join(missing_settings)
+    )
+    st.stop()
 
 if reset_chat:
     st.session_state.messages = []
     st.session_state.last_answer = None
     st.rerun()
-
-
-if not active_vector_store:
-    st.warning(
-        "Please enter an OpenAI vector store ID in the sidebar "
-        "or add VECTOR_STORE_ID to your local .env file."
-    )
-    render_source_panel(st.session_state.last_answer)
-    st.stop()
-
 
 if mode != "qa":
     st.info(
@@ -87,10 +103,11 @@ if mode != "qa":
     st.stop()
 
 
-active_manifest = load_active_manifest(
-    vdr_folder=VDR_FOLDER,
-    vector_store_id=active_vector_store,
-)
+try:
+    active_vector_store, active_manifest = active_case_qa_inputs(active_case)
+except ActiveCaseError as error:
+    st.error(f"{active_case.display_name} cannot be opened: {error}")
+    st.stop()
 
 
 render_chat_history(st.session_state.messages)

@@ -2,7 +2,9 @@
 
 VDR Assistant MVP 2 is a local Streamlit application for asking questions against documents indexed in an OpenAI vector store.
 
-The current MVP supports one active VDR project at a time and one OpenAI vector store ID at a time.
+The current MVP lists a small set of prepared VDR cases and opens one active
+case at a time. Each prepared case uses its own manifest and OpenAI vector
+store.
 
 ## Current functionality
 
@@ -18,6 +20,8 @@ The current MVP supports one active VDR project at a time and one OpenAI vector 
 - Return a fallback response when information is not found in the VDR documents
 - Maintain short conversation history for follow-up questions
 - Reset the chat session from the sidebar
+- Select one prepared case when the application starts
+- Close the active case and safely return to case selection
 
 Successful main answers are synthesized from cited VDR evidence. A Markdown
 table in the main answer is not automatically verified cell by cell. The UI
@@ -110,15 +114,34 @@ Example:
 ```env
 OPENAI_API_KEY=your_openai_api_key_here
 OPENAI_MODEL=gpt-4.1
-VECTOR_STORE_ID=your_vector_store_id_here
-# Optional: local VDR root used to resolve folder-aware citations
-VDR_FOLDER=
+CASE_REGISTRY_PATH=cases.local.json
 ```
 
-`VDR_FOLDER` is optional. Set it to the local VDR root whose sibling
-`VDR Assistant/manifest.json` belongs to the selected vector store. If the
-folder, manifest, or vector-store association is unavailable, Q&A continues
-with filename-only citations.
+`CASE_REGISTRY_PATH` may be absolute or relative to the repository root. The
+real registry is local and ignored by Git. Copy `cases.example.json` to
+`cases.local.json` and configure each prepared case with only a stable
+`case_id` and its local `vdr_folder`:
+
+```json
+{
+  "cases": [
+    {
+      "case_id": "example-case",
+      "vdr_folder": "./prepared-cases/example-case/VDR"
+    }
+  ]
+}
+```
+
+Relative VDR paths are resolved from the registry file. Absolute paths are
+also supported in the ignored local registry. The selected case manifest must
+exist in the VDR folder's sibling `VDR Assistant/manifest.json` and must
+contain a usable case name and vector-store ID. The manifest remains the
+source of truth for case metadata, document mappings, and ingestion state.
+
+The application blocks incomplete prepared cases instead of silently mixing a
+VDR folder, manifest, and vector store. The vector-store ID is not editable in
+normal chat.
 
 Do not commit `.env` to GitHub.
 
@@ -148,6 +171,7 @@ VDR-Assistant-MVP-2/
 |   |-- ui/
 |   |-- validation/
 |-- tests/
+|-- cases.example.json
 |-- .env.example
 |-- .gitignore
 |-- README.md
@@ -162,24 +186,25 @@ Each team member needs:
 
 - Access to the GitHub repository
 - A valid OpenAI API key
-- The correct OpenAI vector store ID
+- Access to each prepared case's local VDR folder and manifest
+- A local ignored case registry
 - A local `.env` file
 
 ## Current scope
 
 Implemented:
 
+- Prepared-case selection with isolated chat state
 - Local Streamlit Q&A workflow
 - OpenAI File Search integration
-- Source file display
-- Basic answer validation
-- Basic error handling
+- Folder-aware citations and ranked retrieved evidence
+- Verified quotations and structured evidence
+- Manifest-driven ingestion operator scripts
 - Reset chat button
 
 Not implemented yet:
 
-- VDR ingestion from local folders
-- Folder structure preservation
+- Case creation or ingestion administration in Streamlit
 - Compare workflow
 - Summarize workflow
 - User authentication

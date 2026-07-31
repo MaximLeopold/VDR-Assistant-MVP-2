@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# Local prepared-case registry (contains machine-specific VDR paths)
+cases.local.json
+
 # Python
 __pycache__/
 *.py[cod]

@@ -1,0 +1,8 @@
+{
+  "cases": [
+    {
+      "case_id": "example-case",
+      "vdr_folder": "./prepared-cases/example-case/VDR"
+    }
+  ]
+}
