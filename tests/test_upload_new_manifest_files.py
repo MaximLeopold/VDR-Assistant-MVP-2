@@ -80,6 +80,8 @@ def test_no_eligible_records_skips_confirmation_save_and_client(
     vdr_folder = make_case(tmp_path)
     manifest = load_manifest(vdr_folder)
     manifest.files[0].openai_file_id = "file_existing"
+    manifest.files[0].upload_status = "uploaded"
+    manifest.files[0].indexing_status = "completed"
     save_manifest(manifest, vdr_folder)
     save = Mock()
     client_factory = Mock()
@@ -223,6 +225,7 @@ def test_success_persists_uploading_id_and_completed_states_in_order(
     assert snapshots == [
         (None, "uploading", "not_started", 1, None),
         ("file_new", "uploaded", "not_started", 1, None),
+        ("file_new", "uploaded", "in_progress", 1, None),
         ("file_new", "uploaded", "completed", 1, None),
     ]
     assert events == [
@@ -230,12 +233,13 @@ def test_success_persists_uploading_id_and_completed_states_in_order(
         "save:not_started",
         "upload:new.pdf",
         "save:not_started",
+        "save:in_progress",
         "attach:file_new",
         "save:completed",
     ]
 
 
-def test_upload_failure_is_persisted_without_retry(
+def test_generic_upload_failure_is_persisted_as_uncertain_without_retry(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -251,15 +255,16 @@ def test_upload_failure_is_persisted_without_retry(
     assert script.main() == 1
     persisted = load_manifest(vdr_folder).files[0]
     assert persisted.openai_file_id is None
-    assert persisted.upload_status == "failed"
+    assert persisted.upload_status == "uploading"
     assert persisted.indexing_status == "not_started"
     assert persisted.upload_attempts == 1
-    assert "synthetic upload failure" in persisted.last_error
+    assert "uncertain" in persisted.last_error
+    assert "synthetic upload failure" not in persisted.last_error
     upload.assert_called_once()
     attach.assert_not_called()
 
 
-def test_attachment_exception_preserves_id_and_marks_indexing_failed(
+def test_attachment_exception_preserves_id_and_in_progress_recovery_state(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -282,8 +287,8 @@ def test_attachment_exception_preserves_id_and_marks_indexing_failed(
     persisted = load_manifest(vdr_folder).files[0]
     assert persisted.openai_file_id == "file_uploaded"
     assert persisted.upload_status == "uploaded"
-    assert persisted.indexing_status == "failed"
-    assert "could not be confirmed" in persisted.last_error
+    assert persisted.indexing_status == "in_progress"
+    assert "requires recovery" in persisted.last_error
 
 
 @pytest.mark.parametrize("remote_status", ["failed", "cancelled"])
@@ -318,7 +323,7 @@ def test_remote_terminal_failure_statuses_map_to_indexing_failed(
     assert persisted.upload_status == "uploaded"
     assert persisted.indexing_status == "failed"
     assert remote_status in persisted.last_error
-    assert "synthetic remote failure" in persisted.last_error
+    assert "synthetic remote failure" not in persisted.last_error
 
 
 def test_id_save_failure_stops_before_attachment_and_reports_id(
@@ -357,7 +362,7 @@ def test_id_save_failure_stops_before_attachment_and_reports_id(
     assert all(record.openai_file_id is None for record in persisted.files)
 
 
-def test_terminal_save_failure_stops_later_files_with_id_recoverable(
+def test_in_progress_save_failure_stops_before_attachment_and_later_files(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -387,7 +392,7 @@ def test_terminal_save_failure_stops_later_files_with_id_recoverable(
 
     assert script.main() == 1
     upload.assert_called_once()
-    attach.assert_called_once()
+    attach.assert_not_called()
     persisted = load_manifest(vdr_folder)
     first = persisted.files[0]
     second = persisted.files[1]

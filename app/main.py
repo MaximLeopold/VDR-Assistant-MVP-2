@@ -73,6 +73,7 @@ if active_case is None:
             st.session_state,
             prepared_cases,
             repository_root=PROJECT_ROOT,
+            registry_path=CASE_REGISTRY_PATH,
         )
         st.stop()
 

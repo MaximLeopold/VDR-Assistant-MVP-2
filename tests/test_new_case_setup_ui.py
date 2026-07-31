@@ -2,12 +2,17 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from streamlit.testing.v1 import AppTest
 
 from src.config import settings
 from src.ingestion.manifest import VDRManifest
-from src.ingestion.manifest_persistence import create_manifest, load_manifest
+from src.ingestion.manifest_builder import build_manifest
+from src.ingestion.manifest_persistence import (
+    create_manifest,
+    load_manifest,
+)
 from src.ui import new_case_setup as new_case_ui
 
 
@@ -35,10 +40,24 @@ def make_registered_case(root: Path) -> Path:
 class FakeFiles:
     def __init__(self):
         self.calls = []
+        self.attach_calls = []
 
     def list(self, vector_store_id):
         self.calls.append(vector_store_id)
         return []
+
+    def create_and_poll(self, file_id, *, vector_store_id):
+        self.attach_calls.append((vector_store_id, file_id))
+        return SimpleNamespace(status="completed")
+
+
+class FakeOpenAIFiles:
+    def __init__(self):
+        self.create_calls = []
+
+    def create(self, *, file, purpose):
+        self.create_calls.append((Path(file.name).name, purpose))
+        return SimpleNamespace(id=f"file_{Path(file.name).stem}")
 
 
 class FakeVectorStores:
@@ -54,6 +73,7 @@ class FakeVectorStores:
 class FakeClient:
     def __init__(self):
         self.vector_stores = FakeVectorStores()
+        self.files = FakeOpenAIFiles()
 
 
 def button_with_label(app: AppTest, label: str):
@@ -188,3 +208,123 @@ def test_active_case_never_shows_setup_action(
     assert len(app.exception) == 0
     assert len(app.chat_input) == 1
     assert all(button.label != "Prepare new case" for button in app.button)
+
+
+def test_phase2_streamlit_flow_previews_uploads_and_registers_with_fake_client(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    existing_vdr = make_registered_case(tmp_path)
+    registry_path = tmp_path / "cases.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {"case_id": "existing", "vdr_folder": str(existing_vdr)}
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    new_vdr = tmp_path / "new" / "Project B" / "VDR"
+    new_vdr.mkdir(parents=True)
+    (new_vdr / "document.pdf").write_bytes(b"phase two")
+
+    fake_client = FakeClient()
+    monkeypatch.setattr(settings, "CASE_REGISTRY_PATH", str(registry_path))
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(new_case_ui, "get_openai_client", lambda: fake_client)
+
+    app = AppTest.from_file("app/main.py").run()
+    button_with_label(app, "Prepare new case").click().run()
+    input_with_label(app, "Local VDR folder").input(str(new_vdr))
+    input_with_label(app, "Technical case ID").input("CASE-B")
+    app.run()
+    button_with_label(app, "Validate and scan").click().run()
+    button_with_label(app, "Create manifest").click().run()
+    input_with_label(app, "OpenAI vector-store ID").input("vs_new_case")
+    app.run()
+    button_with_label(app, "Validate and associate").click().run()
+
+    button_with_label(app, "Continue case preparation").click().run()
+
+    assert len(app.exception) == 0
+    assert any("Upload preview" in item.value for item in app.subheader)
+    assert fake_client.files.create_calls == []
+    assert fake_client.vector_stores.files.attach_calls == []
+    assert load_manifest(new_vdr).files[0].upload_status == "not_uploaded"
+
+    button_with_label(app, "Upload and index all eligible files").click().run()
+
+    assert len(app.exception) == 0
+    assert fake_client.files.create_calls == [("document.pdf", "assistants")]
+    assert fake_client.vector_stores.files.attach_calls == [
+        ("vs_new_case", "file_document")
+    ]
+    persisted = load_manifest(new_vdr).files[0]
+    assert persisted.openai_file_id == "file_document"
+    assert persisted.upload_status == "uploaded"
+    assert persisted.indexing_status == "completed"
+    assert any("Upload result" in item.value for item in app.subheader)
+
+    button_with_label(app, "Continue to registration").click().run()
+    assert any("Register prepared case" in item.value for item in app.subheader)
+    button_with_label(app, "Register prepared case").click().run()
+
+    assert len(app.exception) == 0
+    assert any("Case preparation complete" in item.value for item in app.subheader)
+    stored = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert stored["cases"][-1] == {
+        "case_id": "case-b",
+        "vdr_folder": new_vdr.resolve().as_posix(),
+    }
+
+    button_with_label(app, "Return to case selection").click().run()
+    assert len(app.exception) == 0
+    assert "Project B" in app.selectbox[0].options
+    assert len(app.chat_input) == 0
+
+
+def test_restart_resume_reuses_associated_manifest_and_preview_is_read_only(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    existing_vdr = make_registered_case(tmp_path)
+    registry_path = tmp_path / "cases.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {"case_id": "existing", "vdr_folder": str(existing_vdr)}
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    new_vdr = tmp_path / "resume" / "Project C" / "VDR"
+    new_vdr.mkdir(parents=True)
+    (new_vdr / "document.pdf").write_bytes(b"resume")
+    manifest = build_manifest(str(new_vdr))
+    manifest.vector_store_id = "vs_resume"
+    create_manifest(manifest, new_vdr)
+    before = load_manifest(new_vdr).model_dump()
+
+    factory = Mock(return_value=FakeClient())
+    monkeypatch.setattr(settings, "CASE_REGISTRY_PATH", str(registry_path))
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(new_case_ui, "get_openai_client", factory)
+
+    app = AppTest.from_file("app/main.py").run()
+    button_with_label(app, "Prepare new case").click().run()
+    input_with_label(app, "Local VDR folder").input(str(new_vdr))
+    input_with_label(app, "Technical case ID").input("CASE-C")
+    app.run()
+    button_with_label(app, "Validate and scan").click().run()
+
+    assert any("Phase 1 complete" in item.value for item in app.subheader)
+    assert factory.call_count == 0
+    button_with_label(app, "Continue case preparation").click().run()
+
+    assert any("Upload preview" in item.value for item in app.subheader)
+    assert factory.call_count == 0
+    assert load_manifest(new_vdr).model_dump() == before

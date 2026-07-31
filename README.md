@@ -24,6 +24,8 @@ store.
 - Close the active case and safely return to case selection
 - Prepare an unregistered new case by scanning a local VDR, creating its
   manifest, and associating a manually created empty OpenAI vector store
+- Continue a prepared case through sequential document upload, strict
+  readiness checks, and atomic local case registration
 
 Successful main answers are synthesized from cited VDR evidence. A Markdown
 table in the main answer is not automatically verified cell by cell. The UI
@@ -155,7 +157,7 @@ streamlit run app/main.py --server.address 127.0.0.1
 
 The app should open in the browser and remain bound to the local machine.
 
-## Phase 1 new-case preparation
+## New-case preparation and ingestion
 
 From the startup case selector, choose **Prepare new case** to:
 
@@ -164,11 +166,40 @@ From the startup case selector, choose **Prepare new case** to:
 2. run and review a read-only file-metadata scan;
 3. explicitly create the local manifest; and
 4. validate and associate an empty vector store that you created manually in
-   the OpenAI Platform.
+   the OpenAI Platform;
+5. continue to a read-only upload preview and local preflight;
+6. explicitly upload and index every safely eligible supported document in
+   deterministic, sequential order; and
+7. separately confirm registration after strict readiness passes.
 
-Phase 1 does not upload documents and does not add the case to
-`cases.local.json`. The incomplete case therefore remains unavailable in
-normal case selection. Bulk ingestion and registration belong to Phase 2.
+The upload preview makes no OpenAI call and does not change the manifest. Make
+the complete VDR folder locally available before continuing. For a OneDrive-
+backed folder, select **Always keep on this device**; the one-byte readability
+probe may hydrate cloud-placeholder files.
+
+The Phase 1 manifest remains the fixed ingestion plan. Missing, changed, or
+unreadable reviewed files block the planned batch. Restore the reviewed file
+version instead of refreshing or replacing it automatically. A successful
+registration writes only the technical `case_id` and normalized absolute
+`vdr_folder` to the ignored local registry. Restart Streamlit or return to the
+startup selector to open the newly registered case.
+
+### Recovery boundaries
+
+Rare ambiguous outcomes remain terminal-assisted in this MVP:
+
+- reconciliation cannot find an uploaded but unattached OpenAI file;
+- reconciliation cannot safely resolve stale `uploading` records without a
+  persisted OpenAI file ID;
+- an uploaded file with incomplete or interrupted indexing is never
+  re-uploaded automatically;
+- vector-store adoption is not part of the normal preparation UI;
+- manifest refresh does not replace changed files or remove missing files and
+  is not automatic synchronization.
+
+If OpenAI returned a file ID but local ID persistence failed, preserve the ID
+shown in the narrowly scoped recovery view and do not blindly re-upload the
+document.
 
 ## Project structure
 
@@ -217,11 +248,12 @@ Implemented:
 - Folder-aware citations and ranked retrieved evidence
 - Verified quotations and structured evidence
 - Manifest-driven ingestion operator scripts
+- Guided new-case ingestion and local registration
 - Reset chat button
 
 Not implemented yet:
 
-- Case creation or ingestion administration in Streamlit
+- Registered-case document administration or automatic synchronization
 - Compare workflow
 - Summarize workflow
 - User authentication

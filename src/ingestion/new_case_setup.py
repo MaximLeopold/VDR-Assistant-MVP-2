@@ -17,10 +17,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import re
 from typing import Literal, Sequence
 
-from src.config.case_registry import PreparedCase
+from src.config.case_registry import (
+    CaseRegistryError,
+    PreparedCase,
+    normalize_case_id,
+)
 from src.ingestion.manifest import VDRManifest
 from src.ingestion.manifest_builder import build_manifest
 from src.ingestion.manifest_persistence import (
@@ -33,9 +36,6 @@ from src.ingestion.vector_store_manager import (
     InvalidVectorStoreIdError,
     normalize_vector_store_id,
 )
-
-
-CASE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 class NewCaseSetupError(Exception):
@@ -127,15 +127,10 @@ def normalize_folder_input(raw_path: str) -> str:
 def normalize_new_case_id(raw_case_id: str) -> str:
     """Return a normalized new technical case ID or raise a safe error."""
 
-    normalized = raw_case_id.strip().lower() if isinstance(raw_case_id, str) else ""
-    if not normalized:
-        raise NewCaseValidationError("A technical case ID is required.")
-    if not CASE_ID_PATTERN.fullmatch(normalized):
-        raise NewCaseValidationError(
-            "Use 1-64 lower-case letters, numbers, hyphens, or underscores; "
-            "the first character must be a letter or number."
-        )
-    return normalized
+    try:
+        return normalize_case_id(raw_case_id)
+    except CaseRegistryError as error:
+        raise NewCaseValidationError(str(error)) from error
 
 
 def _path_key(path: Path) -> str:

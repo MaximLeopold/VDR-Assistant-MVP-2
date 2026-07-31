@@ -1,4 +1,4 @@
-"""Streamlit UI for Phase 1 preparation of one unregistered VDR case."""
+"""Streamlit UI for preparing and registering one new VDR case."""
 
 from __future__ import annotations
 
@@ -7,7 +7,11 @@ from pathlib import Path
 
 import streamlit as st
 
-from src.config.case_registry import PreparedCase
+from src.config.case_registry import (
+    CaseRegistryError,
+    PreparedCase,
+    register_prepared_case,
+)
 from src.config.settings import validate_settings
 from src.ingestion.case_vector_store import (
     CaseVectorStoreAlreadyUsedError,
@@ -17,6 +21,7 @@ from src.ingestion.case_vector_store import (
     associate_empty_case_vector_store,
     mask_vector_store_id,
 )
+from src.ingestion.case_readiness import assess_case_readiness
 from src.ingestion.manifest_persistence import (
     ManifestPersistenceError,
     derive_manifest_paths,
@@ -36,6 +41,14 @@ from src.ingestion.vector_store_manager import (
     VectorStoreError,
     normalize_vector_store_id,
 )
+from src.ingestion.upload_workflow import (
+    UploadBatchResult,
+    UploadDisposition,
+    UploadPreparationError,
+    UploadProgressEvent,
+    prepare_manifest_upload,
+    run_manifest_upload,
+)
 from src.retrieval.openai_file_search import get_openai_client
 
 
@@ -51,6 +64,9 @@ SETUP_COMPLETED_KEY = "setup_completed"
 FOLDER_INPUT_KEY = "setup_folder_input"
 CASE_ID_INPUT_KEY = "setup_case_id_input"
 VECTOR_STORE_INPUT_KEY = "setup_vector_store_input"
+SETUP_UPLOAD_RESULT_KEY = "setup_upload_result"
+SETUP_SAFE_RETRY_KEY = "setup_safe_retry_paths"
+SETUP_REGISTRATION_RESULT_KEY = "setup_registration_result"
 
 SETUP_KEYS = (
     SETUP_ACTIVE_KEY,
@@ -65,6 +81,9 @@ SETUP_KEYS = (
     FOLDER_INPUT_KEY,
     CASE_ID_INPUT_KEY,
     VECTOR_STORE_INPUT_KEY,
+    SETUP_UPLOAD_RESULT_KEY,
+    SETUP_SAFE_RETRY_KEY,
+    SETUP_REGISTRATION_RESULT_KEY,
 )
 
 
@@ -423,9 +442,328 @@ def _render_complete(state: MutableMapping) -> None:
         "- The case has not been registered\n"
         "- The case will not appear in normal case selection yet"
     )
-    st.info("Phase 2 will add bulk document ingestion and case registration.")
+    st.info(
+        "Continue to review the fixed manifest plan, upload all safely eligible "
+        "documents, and register the case."
+    )
 
-    if st.button("Return to case selection", key="finish_new_case_setup"):
+    continue_column, return_column = st.columns(2)
+    with continue_column:
+        if st.button(
+            "Continue case preparation",
+            type="primary",
+            key="continue_case_preparation",
+        ):
+            state[SETUP_STEP_KEY] = "upload_preview"
+            st.rerun()
+    with return_column:
+        if st.button("Return to case selection", key="finish_new_case_setup"):
+            _cancel_setup(state)
+
+
+def _upload_plan_counts(plan) -> dict[str, int]:
+    return {
+        "Eligible": len(plan.candidates),
+        "Completed": plan.count(UploadDisposition.COMPLETED),
+        "Safe retry": plan.count(UploadDisposition.SAFE_RETRY),
+        "Uncertain": plan.count(UploadDisposition.UNCERTAIN),
+        "Recovery": plan.count(UploadDisposition.RECOVERY_ONLY),
+        "Inconsistent": plan.count(UploadDisposition.INCONSISTENT),
+        "Unsupported": plan.count(UploadDisposition.UNSUPPORTED),
+        "Ignored": plan.count(UploadDisposition.IGNORED),
+    }
+
+
+def _render_upload_plan_metrics(plan) -> None:
+    counts = _upload_plan_counts(plan)
+    first_row = st.columns(4)
+    second_row = st.columns(4)
+    for column, (label, value) in zip(
+        [*first_row, *second_row], counts.items(), strict=True
+    ):
+        column.metric(label, value)
+
+
+def _phase2_progress_callback(progress, status):
+    def callback(event: UploadProgressEvent) -> None:
+        if event.total_candidates:
+            completed_fraction = max(event.current_index - 1, 0)
+            if event.kind in {"indexing_completed", "file_failed"}:
+                completed_fraction = event.current_index
+            progress.progress(
+                min(completed_fraction / event.total_candidates, 1.0)
+            )
+        if event.relative_path:
+            status.info(
+                f"{event.kind.replace('_', ' ').title()}: "
+                f"{event.relative_path}"
+            )
+        elif event.sanitized_message:
+            status.info(event.sanitized_message)
+
+    return callback
+
+
+def _render_upload_preview(state: MutableMapping) -> None:
+    vdr_folder = state.get(SETUP_FOLDER_KEY)
+    if not isinstance(vdr_folder, str):
+        state[SETUP_STEP_KEY] = "details"
+        _set_message(state, "error", "Select the VDR folder again.")
+        st.rerun()
+
+    safe_retry_paths = state.get(SETUP_SAFE_RETRY_KEY, ())
+    if not isinstance(safe_retry_paths, (tuple, list, set, frozenset)):
+        safe_retry_paths = ()
+    try:
+        plan = prepare_manifest_upload(
+            vdr_folder,
+            safe_retry_paths=safe_retry_paths,
+        )
+    except UploadPreparationError as error:
+        st.error(str(error))
+        if st.button("Return to case selection", key="cancel_upload_preparation"):
+            _cancel_setup(state)
+        return
+
+    st.subheader("Step 5 — Upload preview")
+    st.caption(
+        "This preview reloads the fixed Phase 1 manifest and performs only "
+        "local, read-only checks. It does not contact OpenAI or change files."
+    )
+    st.write(f"**Case name:** {plan.case_name}")
+    st.write(
+        f"**Associated vector store:** {mask_vector_store_id(plan.vector_store_id)}"
+    )
+    _render_upload_plan_metrics(plan)
+    if plan.rows:
+        st.dataframe(
+            [row.as_display_dict() for row in plan.rows],
+            hide_index=True,
+            width="stretch",
+        )
+
+    st.info(
+        "Ensure the complete VDR folder is locally available. For OneDrive-"
+        "backed folders, use ‘Always keep on this device’. Preflight may "
+        "download cloud-placeholder files so their local readability can be checked."
+    )
+    for blocker in plan.blockers:
+        st.error(blocker)
+
+    recovery_count = sum(
+        plan.count(disposition)
+        for disposition in (
+            UploadDisposition.UNCERTAIN,
+            UploadDisposition.RECOVERY_ONLY,
+            UploadDisposition.INCONSISTENT,
+            UploadDisposition.CLASSIFICATION_ERROR,
+        )
+    )
+    if recovery_count:
+        st.warning(
+            "Some records require terminal-assisted recovery. Safe candidates "
+            "may still be uploaded, but readiness and registration remain blocked."
+        )
+
+    readiness = assess_case_readiness(vdr_folder)
+    if not plan.candidates:
+        if readiness.is_ready:
+            if st.button(
+                "Continue to registration",
+                type="primary",
+                key="ready_without_upload",
+            ):
+                state[SETUP_STEP_KEY] = "registration_ready"
+                st.rerun()
+        else:
+            st.warning("No files are safely eligible for automatic upload.")
+        if st.button("Return to case selection", key="leave_empty_upload_plan"):
+            _cancel_setup(state)
+        return
+
+    upload_clicked = st.button(
+        "Upload and index all eligible files",
+        type="primary",
+        key="confirm_manifest_ingestion",
+        disabled=bool(plan.blockers) or state.get(SETUP_ACTION_KEY, False),
+        help="This is the explicit ingestion confirmation.",
+    )
+    if not upload_clicked:
+        return
+
+    state[SETUP_ACTION_KEY] = True
+    missing_settings = validate_settings()
+    if missing_settings:
+        state[SETUP_ACTION_KEY] = False
+        st.error("OpenAI API access is not configured.")
+        return
+
+    progress = st.progress(0.0)
+    status = st.empty()
+    try:
+        result = run_manifest_upload(
+            vdr_folder,
+            client_factory=get_openai_client,
+            progress_callback=_phase2_progress_callback(progress, status),
+            safe_retry_paths=safe_retry_paths,
+        )
+    except Exception:
+        state[SETUP_ACTION_KEY] = False
+        st.error("The upload workflow stopped unexpectedly before completion.")
+        st.info("Reload the persisted manifest status before trying another action.")
+        return
+    state[SETUP_UPLOAD_RESULT_KEY] = result
+    state[SETUP_SAFE_RETRY_KEY] = result.safe_retry_paths
+    state[SETUP_ACTION_KEY] = False
+    state[SETUP_STEP_KEY] = "upload_result"
+    st.rerun()
+
+
+def _render_upload_result(state: MutableMapping) -> None:
+    result = state.get(SETUP_UPLOAD_RESULT_KEY)
+    vdr_folder = state.get(SETUP_FOLDER_KEY)
+    if not isinstance(result, UploadBatchResult) or not isinstance(vdr_folder, str):
+        state[SETUP_STEP_KEY] = "upload_preview"
+        st.rerun()
+
+    st.subheader("Step 6 — Upload result")
+    if result.critically_stopped:
+        st.error(result.message)
+    elif result.succeeded:
+        st.success(result.message)
+    else:
+        st.warning("The safe candidates finished, but the case needs attention.")
+
+    metrics = st.columns(4)
+    metrics[0].metric("Completed", result.completed_count)
+    metrics[1].metric("Safe retry", result.safely_retryable_count)
+    metrics[2].metric("Needs recovery", result.recovery_count)
+    metrics[3].metric("Already complete", result.skipped_completed_count)
+
+    if result.files:
+        st.dataframe(
+            [
+                {
+                    "Relative path": item.relative_path,
+                    "Outcome": item.outcome.replace("_", " "),
+                    "Message": item.message,
+                }
+                for item in result.files
+            ],
+            hide_index=True,
+            width="stretch",
+        )
+
+    if result.recovery_file_id is not None:
+        with st.expander("Critical file-ID recovery information"):
+            st.error(
+                "OpenAI returned a file ID, but it could not be saved. Do not "
+                "re-upload this file. Preserve this ID for terminal-assisted recovery."
+            )
+            st.code(result.recovery_file_id, language=None)
+
+    readiness = assess_case_readiness(vdr_folder)
+    if readiness.is_ready:
+        st.success(
+            f"Strict readiness passed for all {readiness.supported_count} "
+            "supported documents."
+        )
+        if st.button(
+            "Continue to registration",
+            type="primary",
+            key="continue_to_registration",
+        ):
+            state[SETUP_STEP_KEY] = "registration_ready"
+            st.rerun()
+    else:
+        st.warning("The case is not ready for registration.")
+        for reason in readiness.blocking_reasons:
+            st.write(f"- {reason}")
+        label = (
+            "Review safe retry"
+            if result.safe_retry_paths
+            else "Reload upload status"
+        )
+        if st.button(label, key="review_upload_again"):
+            state[SETUP_STEP_KEY] = "upload_preview"
+            st.rerun()
+
+    if st.button("Return to case selection", key="leave_upload_result"):
+        _cancel_setup(state)
+
+
+def _render_registration(
+    state: MutableMapping,
+    *,
+    registry_path: str | Path | None,
+    repository_root: Path,
+) -> None:
+    vdr_folder = state.get(SETUP_FOLDER_KEY)
+    case_id = state.get(SETUP_CASE_ID_KEY)
+    if not isinstance(vdr_folder, str) or not isinstance(case_id, str):
+        state[SETUP_STEP_KEY] = "details"
+        _set_message(state, "error", "Re-enter the case details.")
+        st.rerun()
+
+    readiness = assess_case_readiness(vdr_folder)
+    if not readiness.is_ready:
+        st.error("The case is no longer ready for registration.")
+        if st.button("Return to upload status", key="registration_not_ready"):
+            state[SETUP_STEP_KEY] = "upload_preview"
+            st.rerun()
+        return
+
+    st.subheader("Step 7 — Register prepared case")
+    st.success(
+        f"All {readiness.supported_count} supported documents are uploaded "
+        "and indexed."
+    )
+    st.write(f"**Technical case ID:** {case_id}")
+    st.caption(
+        "Registration writes only the technical case ID and normalized local "
+        "VDR folder path to the ignored local registry."
+    )
+
+    register_clicked = st.button(
+        "Register prepared case",
+        type="primary",
+        key="confirm_case_registration",
+        disabled=state.get(SETUP_ACTION_KEY, False),
+        help="This is a separate explicit local registration action.",
+    )
+    if not register_clicked:
+        return
+
+    state[SETUP_ACTION_KEY] = True
+    try:
+        result = register_prepared_case(
+            registry_path,
+            case_id,
+            vdr_folder,
+            base_dir=repository_root,
+        )
+    except CaseRegistryError as error:
+        state[SETUP_ACTION_KEY] = False
+        st.error(str(error))
+        st.info("Ingestion is unchanged. Registration can be retried safely.")
+        return
+
+    state[SETUP_ACTION_KEY] = False
+    state[SETUP_REGISTRATION_RESULT_KEY] = result
+    state[SETUP_STEP_KEY] = "registered_complete"
+    st.rerun()
+
+
+def _render_registered_complete(state: MutableMapping) -> None:
+    result = state.get(SETUP_REGISTRATION_RESULT_KEY)
+    case_id = getattr(result, "case_id", state.get(SETUP_CASE_ID_KEY, ""))
+    st.subheader("Step 8 — Case preparation complete")
+    st.success(f"Case {case_id} is registered and ready for selection.")
+    st.info(
+        "Return to the startup selector or restart Streamlit. The new case "
+        "will not be activated automatically in this session."
+    )
+    if st.button("Return to case selection", key="finish_registered_case"):
         _cancel_setup(state)
 
 
@@ -434,13 +772,14 @@ def render_new_case_setup(
     registered_cases: Sequence[PreparedCase],
     *,
     repository_root: str | Path,
+    registry_path: str | Path | None,
 ) -> None:
-    """Render the staged Phase 1 flow without activating a Q&A case."""
+    """Render the staged preparation flow without activating a Q&A case."""
 
     st.header("Prepare a new VDR case")
     st.caption(
-        "Phase 1 creates a local manifest and associates a manually created "
-        "empty vector store. It does not upload or register the case."
+        "Prepare a reviewed local manifest, associate a manually created empty "
+        "vector store, upload sequentially, and register the ready case."
     )
     _render_pending_message(state)
 
@@ -452,5 +791,17 @@ def render_new_case_setup(
         _render_association(state, registered_cases)
     elif step == "complete":
         _render_complete(state)
+    elif step == "upload_preview":
+        _render_upload_preview(state)
+    elif step == "upload_result":
+        _render_upload_result(state)
+    elif step == "registration_ready":
+        _render_registration(
+            state,
+            registry_path=registry_path,
+            repository_root=root,
+        )
+    elif step == "registered_complete":
+        _render_registered_complete(state)
     else:
         _render_details(state, registered_cases, root)
