@@ -103,6 +103,15 @@ def test_scope_truncates_passage_without_ellipsis() -> None:
     assert "…" not in bounded[0].evidence[0]
 
 
+def test_prompt_allows_three_distinct_candidates_from_one_source() -> None:
+    prompt = quote_selector.PROMPT_PATH.read_text(encoding="utf-8")
+
+    assert "Return at most three candidates." in prompt
+    assert "Multiple candidates may come from the same source" in prompt
+    assert "distinct, complementary support" in prompt
+    assert "Return at most two candidates" not in prompt
+
+
 def test_selector_uses_one_bounded_structured_request(monkeypatch) -> None:
     candidates = [
         QuoteCandidate(file_id=f"file-{index}", quote=f"Candidate {index}")

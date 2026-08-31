@@ -12,6 +12,6 @@ For every candidate:
 - Do not repair OCR or PDF extraction issues.
 - Prefer wording that directly supports a material claim in the answer.
 
-Return at most two candidates and normally at most one candidate per source. Omit candidates when no concise exact quotation is appropriate.
+Return at most three candidates. Prefer two or three only when each quotation is directly relevant and adds distinct, complementary support. Multiple candidates may come from the same source when their wording is distinct and useful. Omit candidates when no concise exact quotation is appropriate, and do not add weak or repetitive wording merely to reach a count.
 
 Do not return explanations, filenames, breadcrumbs, page numbers, or section numbers.

@@ -24,6 +24,7 @@ class FakeStreamlit:
     def __init__(self):
         self.chat_roles = []
         self.expander_labels = []
+        self.expander_calls = []
         self.markdown_calls = []
         self.caption_calls = []
         self.text_calls = []
@@ -38,8 +39,9 @@ class FakeStreamlit:
         self.chat_roles.append(role)
         return NullContext()
 
-    def expander(self, label):
+    def expander(self, label, **kwargs):
         self.expander_labels.append(label)
+        self.expander_calls.append((label, kwargs))
         self.events.append(("expander", label))
         return NullContext()
 
@@ -325,9 +327,11 @@ def test_render_answer_uses_safe_source_level_evidence_expander(
     ]
     assert fake_st.caption_calls == [
         chat.SYNTHESIZED_ANSWER_CAPTION,
+        chat.FORMATTED_SOURCE_EXCERPTS_CAPTION,
         "Raw passage 1",
         "Raw passage 2",
     ]
+    assert chat.FORMATTED_SOURCE_EXCERPTS_HEADING in fake_st.markdown_calls
     assert all("Showing" not in caption for caption in fake_st.caption_calls)
     assert all("of 4" not in caption for caption in fake_st.caption_calls)
 
@@ -525,7 +529,7 @@ def test_verified_quotes_render_safely_between_answer_and_sources(
     chat.render_answer(answer)
 
     answer_event = ("markdown", "Supported answer")
-    heading_event = ("markdown", "**Verified quotations**")
+    heading_event = ("expander", "Verified quotations")
     source_event = ("markdown", "**Sources**")
     assert fake_st.events.index(answer_event) < fake_st.events.index(heading_event)
     assert fake_st.events.index(heading_event) < fake_st.events.index(source_event)
@@ -548,8 +552,10 @@ def test_verified_quotes_render_safely_between_answer_and_sources(
     assert "score" not in rendered.lower()
     assert "confidence" not in rendered.lower()
     assert fake_st.expander_labels == [
+        "Verified quotations",
         "Retrieved evidence — VDR → Finance → Annual Report.pdf"
     ]
+    assert fake_st.expander_calls[0] == ("Verified quotations", {})
 
 
 def test_verified_quotation_section_is_omitted_when_empty(monkeypatch) -> None:
@@ -558,7 +564,7 @@ def test_verified_quotation_section_is_omitted_when_empty(monkeypatch) -> None:
 
     chat.render_answer(structured_answer())
 
-    assert "**Verified quotations**" not in fake_st.markdown_calls
+    assert "Verified quotations" not in fake_st.expander_labels
 
 
 def test_verified_quotations_remain_before_structured_sources(
@@ -574,7 +580,7 @@ def test_verified_quotations_remain_before_structured_sources(
 
     chat.render_answer(answer)
 
-    quote_heading = ("markdown", "**Verified quotations**")
+    quote_heading = ("expander", "Verified quotations")
     source_heading = ("markdown", "**Sources**")
     structured_tabs = (
         "tabs",
@@ -713,7 +719,13 @@ def test_single_passage_renders_directly_without_inner_navigation(
     chat.render_evidence_tab(source)
 
     assert fake_st.tabs_calls == []
-    assert fake_st.caption_calls == ["Best supporting passage"]
+    assert fake_st.caption_calls == [
+        chat.FORMATTED_SOURCE_EXCERPTS_CAPTION,
+        "Best supporting passage",
+    ]
+    assert fake_st.markdown_calls == [
+        chat.FORMATTED_SOURCE_EXCERPTS_HEADING
+    ]
     assert fake_st.text_calls == [
         ("Only passage", {"width": "stretch"})
     ]
@@ -738,6 +750,17 @@ def test_two_passages_use_ranked_inner_tabs_and_ignore_later_passages(
             {"default": "Best supporting passage"},
         )
     ]
+    assert fake_st.caption_calls == [
+        chat.FORMATTED_SOURCE_EXCERPTS_CAPTION
+    ]
+    assert fake_st.events.index(
+        ("markdown", chat.FORMATTED_SOURCE_EXCERPTS_HEADING)
+    ) < fake_st.events.index(
+        (
+            "tabs",
+            ["Best supporting passage", "Additional retrieved context"],
+        )
+    )
     assert [text for text, _ in fake_st.text_calls] == ["Best", "Second"]
     rendered = "\n".join(str(value) for _, value in fake_st.events)
     assert "Third" not in rendered
@@ -944,7 +967,38 @@ def test_verified_quotes_survive_serialized_history_replay(monkeypatch) -> None:
         "“Revenue increased from €38.1 million to €42.6 million.”",
         {"width": "stretch"},
     ) in fake_st.text_calls
-    assert "**Verified quotations**" in fake_st.markdown_calls
+    assert "Verified quotations" in fake_st.expander_labels
+
+
+def test_three_same_source_quotes_round_trip_in_collapsed_history_expander(
+    monkeypatch,
+) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+    quotes = [
+        VerifiedQuote(
+            file_id="file-A",
+            source_display_name="VDR → Finance → Annual Report.pdf",
+            text=f"Distinct verified quotation number {index} is preserved.",
+        )
+        for index in range(1, 4)
+    ]
+    answer = structured_answer().model_copy(
+        update={"verified_quotes": quotes}
+    )
+    message = chat.build_assistant_message(answer)
+
+    chat.render_chat_history([message])
+
+    restored = VDRAnswer.model_validate(message["vdr_answer"])
+    assert restored.verified_quotes == quotes
+    assert fake_st.expander_calls[0] == ("Verified quotations", {})
+    assert [text for text, _ in fake_st.text_calls[:3]] == [
+        f"“{quote.text}”" for quote in quotes
+    ]
+    assert fake_st.caption_calls.count(
+        "Source: VDR → Finance → Annual Report.pdf"
+    ) == 3
 
 
 def test_verified_presentations_survive_serialized_history_replay(
@@ -1082,7 +1136,7 @@ def test_old_structured_payload_without_verified_quotes_renders(
     )
 
     assert "Old structured answer" in fake_st.markdown_calls
-    assert "**Verified quotations**" not in fake_st.markdown_calls
+    assert "Verified quotations" not in fake_st.expander_labels
     assert "- Report.pdf" in fake_st.markdown_calls
 
 

@@ -1,14 +1,31 @@
 """Deterministically verify quotation candidates against cited evidence."""
 
+from dataclasses import dataclass
+
 from src.schemas.evidence import SourceReference
 from src.schemas.quotation import QuoteCandidate, VerifiedQuote
 
 
-MAX_VERIFIED_QUOTES = 2
-MAX_VERIFIED_QUOTES_PER_SOURCE = 1
+MAX_VERIFIED_QUOTES = 3
 MIN_VERIFIED_QUOTE_CHARS = 20
 MAX_VERIFIED_QUOTE_CHARS = 500
 MAX_QUOTE_CANDIDATES_TO_PROCESS = 6
+
+
+@dataclass(frozen=True)
+class _SourceDerivedMatch:
+    text: str
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
+class _VerifiedQuoteMatch:
+    quote: VerifiedQuote
+    passage_index: int
+    start: int
+    end: int
+    normalized_text: str
 
 
 def _normalize_whitespace_with_spans(
@@ -47,13 +64,17 @@ def _source_derived_match(
     candidate_text: str,
     normalized_candidate: str,
     passage: str,
-) -> str | None:
+) -> _SourceDerivedMatch | None:
     exact_start = passage.find(candidate_text)
     if exact_start >= 0:
         exact_source_text = passage[
             exact_start : exact_start + len(candidate_text)
         ]
-        return _collapse_whitespace(exact_source_text)
+        return _SourceDerivedMatch(
+            text=_collapse_whitespace(exact_source_text),
+            start=exact_start,
+            end=exact_start + len(candidate_text),
+        )
 
     normalized_passage, source_spans = _normalize_whitespace_with_spans(
         passage
@@ -66,14 +87,18 @@ def _source_derived_match(
     source_start = source_spans[normalized_start][0]
     source_end = source_spans[normalized_end][1]
     source_text = passage[source_start:source_end]
-    return _collapse_whitespace(source_text)
+    return _SourceDerivedMatch(
+        text=_collapse_whitespace(source_text),
+        start=source_start,
+        end=source_end,
+    )
 
 
-def verify_quote_candidate(
+def _verify_quote_candidate_with_match(
     candidate: QuoteCandidate,
     quote_sources: list[SourceReference],
-) -> VerifiedQuote | None:
-    """Verify one candidate and return only source-derived quotation text."""
+) -> _VerifiedQuoteMatch | None:
+    """Verify one candidate and retain local passage-match metadata."""
 
     if (
         not candidate.file_id
@@ -103,20 +128,52 @@ def verify_quote_candidate(
     ):
         return None
 
-    for passage in source.evidence:
-        source_text = _source_derived_match(
+    for passage_index, passage in enumerate(source.evidence):
+        source_match = _source_derived_match(
             candidate_text,
             normalized_candidate,
             passage,
         )
-        if source_text is not None:
-            return VerifiedQuote(
+        if source_match is not None:
+            quote = VerifiedQuote(
                 file_id=candidate.file_id,
                 source_display_name=source.display_name,
-                text=source_text,
+                text=source_match.text,
+            )
+            return _VerifiedQuoteMatch(
+                quote=quote,
+                passage_index=passage_index,
+                start=source_match.start,
+                end=source_match.end,
+                normalized_text=_collapse_whitespace(quote.text),
             )
 
     return None
+
+
+def verify_quote_candidate(
+    candidate: QuoteCandidate,
+    quote_sources: list[SourceReference],
+) -> VerifiedQuote | None:
+    """Verify one candidate and return only source-derived quotation text."""
+
+    verified = _verify_quote_candidate_with_match(candidate, quote_sources)
+    return None if verified is None else verified.quote
+
+
+def _is_contained_by(
+    candidate: _VerifiedQuoteMatch,
+    other: _VerifiedQuoteMatch,
+) -> bool:
+    """Return whether another nonidentical match wholly contains a candidate."""
+
+    return (
+        candidate.quote.file_id == other.quote.file_id
+        and candidate.passage_index == other.passage_index
+        and candidate.normalized_text != other.normalized_text
+        and other.start <= candidate.start
+        and candidate.end <= other.end
+    )
 
 
 def verify_quote_candidates(
@@ -124,32 +181,32 @@ def verify_quote_candidates(
     quote_sources: list[SourceReference],
     max_quotes: int = MAX_VERIFIED_QUOTES,
 ) -> list[VerifiedQuote]:
-    """Verify candidates in order with answer- and source-level limits."""
+    """Verify, deduplicate, and limit quotation candidates in stable order."""
 
     quote_limit = min(max(max_quotes, 0), MAX_VERIFIED_QUOTES)
     if quote_limit == 0:
         return []
 
-    verified_quotes: list[VerifiedQuote] = []
-    verified_per_source: dict[str, int] = {}
+    verified_matches: list[_VerifiedQuoteMatch] = []
+    seen_text: set[str] = set()
 
     for candidate in candidates[:MAX_QUOTE_CANDIDATES_TO_PROCESS]:
-        if len(verified_quotes) == quote_limit:
-            break
-
-        if (
-            verified_per_source.get(candidate.file_id, 0)
-            >= MAX_VERIFIED_QUOTES_PER_SOURCE
-        ):
-            continue
-
-        verified = verify_quote_candidate(candidate, quote_sources)
+        verified = _verify_quote_candidate_with_match(candidate, quote_sources)
         if verified is None:
             continue
 
-        verified_quotes.append(verified)
-        verified_per_source[verified.file_id] = (
-            verified_per_source.get(verified.file_id, 0) + 1
-        )
+        if verified.normalized_text in seen_text:
+            continue
+        seen_text.add(verified.normalized_text)
+        verified_matches.append(verified)
 
-    return verified_quotes
+    survivors = [
+        candidate
+        for index, candidate in enumerate(verified_matches)
+        if not any(
+            index != other_index and _is_contained_by(candidate, other)
+            for other_index, other in enumerate(verified_matches)
+        )
+    ]
+
+    return [match.quote for match in survivors[:quote_limit]]

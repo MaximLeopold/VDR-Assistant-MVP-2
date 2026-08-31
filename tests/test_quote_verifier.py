@@ -127,7 +127,13 @@ def test_highest_ranked_passage_is_checked_first(monkeypatch) -> None:
 
     def fake_match(candidate_text, normalized_candidate, passage):
         calls.append(passage)
-        return "Source-derived first match" if passage == "first" else None
+        if passage != "first":
+            return None
+        return quote_verifier._SourceDerivedMatch(
+            text="Source-derived first match",
+            start=0,
+            end=len(passage),
+        )
 
     monkeypatch.setattr(quote_verifier, "_source_derived_match", fake_match)
 
@@ -170,72 +176,197 @@ def test_no_more_than_six_candidates_are_inspected(monkeypatch) -> None:
         inspected.append(candidate.file_id)
         return None
 
-    monkeypatch.setattr(quote_verifier, "verify_quote_candidate", reject)
+    monkeypatch.setattr(
+        quote_verifier,
+        "_verify_quote_candidate_with_match",
+        reject,
+    )
     candidates = [candidate(file_id=f"file-{index}") for index in range(8)]
 
     assert quote_verifier.verify_quote_candidates(candidates, [source()]) == []
     assert inspected == [f"file-{index}" for index in range(6)]
 
 
-def test_limits_to_two_quotes_and_preserves_selector_order() -> None:
+def test_limits_to_three_quotes_and_preserves_selector_order() -> None:
     sources = [
         source("file-A", ["First sufficiently long quotation text."]),
         source("file-B", ["Second sufficiently long quotation text."]),
         source("file-C", ["Third sufficiently long quotation text."]),
+        source("file-D", ["Fourth sufficiently long quotation text."]),
     ]
     candidates = [
         candidate("Second sufficiently long quotation text.", "file-B"),
         candidate("First sufficiently long quotation text.", "file-A"),
         candidate("Third sufficiently long quotation text.", "file-C"),
+        candidate("Fourth sufficiently long quotation text.", "file-D"),
     ]
 
     verified = quote_verifier.verify_quote_candidates(candidates, sources)
 
-    assert [quote.file_id for quote in verified] == ["file-B", "file-A"]
+    assert [quote.file_id for quote in verified] == [
+        "file-B",
+        "file-A",
+        "file-C",
+    ]
 
 
-def test_only_first_verified_quote_per_source_is_kept() -> None:
+def test_three_disjoint_quotes_from_one_passage_are_kept() -> None:
     first = "The first verified quotation is long enough."
-    nested = "first verified quotation is long enough"
-    overlapping = "The first verified quotation is long enough. Another clause."
-    sources = [source(evidence=[f"{overlapping} Final clause."])]
+    second = "The second verified quotation is also long enough."
+    third = "The third verified quotation remains distinct and useful."
+    sources = [source(evidence=[f"{first} {second} {third}"])]
 
     verified = quote_verifier.verify_quote_candidates(
-        [candidate(first), candidate(nested), candidate(overlapping)],
+        [candidate(first), candidate(second), candidate(third)],
         sources,
     )
 
-    assert [quote.text for quote in verified] == [first]
+    assert [quote.text for quote in verified] == [first, second, third]
 
 
-def test_identical_wording_from_different_file_ids_may_remain() -> None:
+def test_identical_wording_from_different_file_ids_keeps_first_source() -> None:
     shared = "Identical verified wording exists in both source documents."
-    sources = [source("file-A", [shared]), source("file-B", [shared])]
+    sources = [
+        source("file-A", [shared], "First source"),
+        source("file-B", [shared], "Second source"),
+    ]
 
     verified = quote_verifier.verify_quote_candidates(
         [candidate(shared, "file-A"), candidate(shared, "file-B")],
         sources,
     )
 
-    assert [quote.file_id for quote in verified] == ["file-A", "file-B"]
-    assert [quote.text for quote in verified] == [shared, shared]
+    assert verified == [
+        VerifiedQuote(
+            file_id="file-A",
+            source_display_name="First source",
+            text=shared,
+        )
+    ]
 
 
-def test_verification_stops_after_final_limit(monkeypatch) -> None:
+def test_whitespace_equivalent_duplicates_are_kept_once_overall() -> None:
+    normalized = "Revenue increased to EUR 42 million in the period."
+    sources = [
+        source("file-A", ["Revenue increased to\nEUR 42 million in the period."]),
+        source("file-B", ["Revenue  increased to EUR 42 million in the period."]),
+    ]
+
+    verified = quote_verifier.verify_quote_candidates(
+        [candidate(normalized, "file-A"), candidate(normalized, "file-B")],
+        sources,
+    )
+
+    assert len(verified) == 1
+    assert verified[0].file_id == "file-A"
+    assert verified[0].text == normalized
+
+
+@pytest.mark.parametrize("candidate_order", ["short-first", "long-first"])
+def test_contained_quote_is_replaced_by_longer_match_regardless_of_order(
+    candidate_order: str,
+) -> None:
+    short = "completion of due diligence remains required"
+    long = f"Satisfactory {short} before closing."
+    sources = [source(evidence=[f"Prefix. {long} Suffix."])]
+    quotes = [candidate(short), candidate(long)]
+    if candidate_order == "long-first":
+        quotes.reverse()
+
+    verified = quote_verifier.verify_quote_candidates(quotes, sources)
+
+    assert [quote.text for quote in verified] == [long]
+
+
+def test_containment_applies_only_within_the_same_source_passage() -> None:
+    short = "completion of due diligence remains required"
+    long = f"Satisfactory {short} before closing."
+    sources = [source(evidence=[short, long])]
+
+    verified = quote_verifier.verify_quote_candidates(
+        [candidate(short), candidate(long)],
+        sources,
+    )
+
+    assert [quote.text for quote in verified] == [short, long]
+
+
+def test_repeated_text_uses_first_local_match_deterministically() -> None:
+    short = "completion of due diligence remains required"
+    long = f"Satisfactory {short} before closing."
+    passage = f"{short} elsewhere. Later, {long}"
+
+    verified = quote_verifier.verify_quote_candidates(
+        [candidate(short), candidate(long)],
+        [source(evidence=[passage])],
+    )
+
+    assert [quote.text for quote in verified] == [short, long]
+
+
+def test_partial_overlap_is_not_rejected() -> None:
+    passage = "Alpha section provides material support and context for closing."
+    first = "Alpha section provides material support and context"
+    second = "material support and context for closing."
+
+    verified = quote_verifier.verify_quote_candidates(
+        [candidate(first), candidate(second)],
+        [source(evidence=[passage])],
+    )
+
+    assert [quote.text for quote in verified] == [first, second]
+
+
+def test_candidate_surplus_fills_three_slots_after_rejections() -> None:
+    first = "The first accepted quotation contains useful support."
+    second = "The second accepted quotation contains different support."
+    third = "The third accepted quotation contains complementary support."
+    passage = f"{first} {second} {third}"
+    candidates = [
+        candidate("This fabricated quotation is not in the passage."),
+        candidate(first),
+        candidate(f"The first accepted quotation\ncontains useful support."),
+        candidate("accepted quotation contains useful support"),
+        candidate(second),
+        candidate(third),
+    ]
+
+    verified = quote_verifier.verify_quote_candidates(
+        candidates,
+        [source(evidence=[passage])],
+    )
+
+    assert [quote.text for quote in verified] == [first, second, third]
+
+
+def test_all_bounded_candidates_are_checked_before_final_limit(
+    monkeypatch,
+) -> None:
     inspected = []
 
     def accept(candidate, quote_sources):
         inspected.append(candidate.file_id)
-        return VerifiedQuote(
+        quote = VerifiedQuote(
             file_id=candidate.file_id,
             source_display_name=candidate.file_id,
-            text=BASE_QUOTE,
+            text=f"{BASE_QUOTE} {candidate.file_id}",
+        )
+        return quote_verifier._VerifiedQuoteMatch(
+            quote=quote,
+            passage_index=0,
+            start=0,
+            end=len(quote.text),
+            normalized_text=quote.text,
         )
 
-    monkeypatch.setattr(quote_verifier, "verify_quote_candidate", accept)
+    monkeypatch.setattr(
+        quote_verifier,
+        "_verify_quote_candidate_with_match",
+        accept,
+    )
     candidates = [candidate(file_id=f"file-{index}") for index in range(5)]
 
     verified = quote_verifier.verify_quote_candidates(candidates, [source()])
 
-    assert len(verified) == 2
-    assert inspected == ["file-0", "file-1"]
+    assert len(verified) == 3
+    assert inspected == ["file-0", "file-1", "file-2", "file-3", "file-4"]

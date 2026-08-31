@@ -32,6 +32,11 @@ FRAGMENTED_LAYOUT_NOTICE = (
     "The original source layout was not preserved in this passage. "
     "Review Raw retrieval for the exact extraction."
 )
+FORMATTED_SOURCE_EXCERPTS_HEADING = "**Formatted source excerpts**"
+FORMATTED_SOURCE_EXCERPTS_CAPTION = (
+    "Source text formatted for readability and sometimes shortened—"
+    "not an AI-written summary."
+)
 
 _MARKDOWN_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 _MARKDOWN_DELIMITER_CELL_RE = re.compile(r"^:?-{3,}:?$")
@@ -476,15 +481,18 @@ def render_evidence_tab(source: SourceReference) -> None:
     """Render up to two ranked passages with restrained hierarchy."""
 
     passages = source.evidence[:MAX_VISIBLE_EVIDENCE_PASSAGES]
+    if not passages or not any(clean_evidence_text(item) for item in passages):
+        return
+
+    st.markdown(FORMATTED_SOURCE_EXCERPTS_HEADING)
+    st.caption(FORMATTED_SOURCE_EXCERPTS_CAPTION)
+
     if len(passages) == 1:
         render_evidence_passage(
             passages[0],
             label="Best supporting passage",
         )
         return
-    if len(passages) < 2:
-        return
-
     labels = ["Best supporting passage", "Additional retrieved context"]
     passage_tabs = st.tabs(labels, default=labels[0])
     for passage_tab, passage in zip(passage_tabs, passages):
@@ -536,10 +544,10 @@ def _render_answer_content(answer: VDRAnswer) -> None:
     render_answer_trust_caption(answer)
 
     if answer.verified_quotes:
-        st.markdown("**Verified quotations**")
-        for quote in answer.verified_quotes:
-            st.text(f"“{quote.text}”", width="stretch")
-            st.caption(f"Source: {quote.source_display_name}")
+        with st.expander("Verified quotations"):
+            for quote in answer.verified_quotes:
+                st.text(f"“{quote.text}”", width="stretch")
+                st.caption(f"Source: {quote.source_display_name}")
 
     if answer.sources:
         st.markdown("**Sources**")

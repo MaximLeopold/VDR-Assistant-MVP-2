@@ -304,6 +304,48 @@ def test_verified_quotes_attach_without_changing_sources_or_evidence(
     assert answer.verified_quotes[0].text == VERIFIABLE_TEXT
 
 
+def test_three_same_source_quotes_preserve_primary_result_and_raw_evidence(
+    monkeypatch,
+) -> None:
+    quote_texts = [
+        "The first distinct source quotation supports the accepted answer.",
+        "The second distinct source quotation adds separate source support.",
+        "The third distinct source quotation adds complementary source support.",
+    ]
+    raw_passage = "\n".join(quote_texts)
+    install_supported_search(
+        monkeypatch,
+        results=[search_result("file-A", raw_passage)],
+    )
+    monkeypatch.setattr(
+        qa_chain,
+        "select_quote_candidates",
+        lambda **kwargs: [
+            QuoteCandidate(file_id="file-A", quote=text)
+            for text in quote_texts
+        ],
+    )
+
+    answer = qa_chain.run_qa_chain(
+        "Question",
+        "vs-test",
+        manifest=manifest(),
+    )
+
+    breadcrumb = "VDR → 03 NBO → Offer.pdf"
+    assert answer.answer == "Supported answer"
+    assert answer.status == "success"
+    assert answer.source_files == [breadcrumb]
+    assert [source.file_id for source in answer.sources] == ["file-A"]
+    assert answer.sources[0].display_name == breadcrumb
+    assert answer.sources[0].evidence == [raw_passage]
+    assert [quote.text for quote in answer.verified_quotes] == quote_texts
+    assert all(
+        quote.source_display_name == breadcrumb
+        for quote in answer.verified_quotes
+    )
+
+
 def test_uncited_results_are_not_sent_to_selector(monkeypatch) -> None:
     install_supported_search(
         monkeypatch,
