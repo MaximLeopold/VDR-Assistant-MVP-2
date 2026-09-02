@@ -106,17 +106,23 @@ def _verify_quote_candidate_with_match(
     ):
         return None
 
-    source = next(
-        (
-            item
-            for item in quote_sources
-            if item.file_id is not None
-            and item.file_id == candidate.file_id
-            and item.evidence
-        ),
-        None,
-    )
-    if source is None:
+    matching_sources = [
+        item
+        for item in quote_sources
+        if item.file_id is not None
+        and item.file_id == candidate.file_id
+        and item.evidence
+    ]
+    if len(matching_sources) != 1:
+        return None
+    source = matching_sources[0]
+
+    passage_index = candidate.passage_index
+    if (
+        type(passage_index) is not int
+        or passage_index < 0
+        or passage_index >= len(source.evidence)
+    ):
         return None
 
     candidate_text = candidate.quote.strip()
@@ -128,27 +134,27 @@ def _verify_quote_candidate_with_match(
     ):
         return None
 
-    for passage_index, passage in enumerate(source.evidence):
-        source_match = _source_derived_match(
-            candidate_text,
-            normalized_candidate,
-            passage,
-        )
-        if source_match is not None:
-            quote = VerifiedQuote(
-                file_id=candidate.file_id,
-                source_display_name=source.display_name,
-                text=source_match.text,
-            )
-            return _VerifiedQuoteMatch(
-                quote=quote,
-                passage_index=passage_index,
-                start=source_match.start,
-                end=source_match.end,
-                normalized_text=_collapse_whitespace(quote.text),
-            )
+    passage = source.evidence[passage_index]
+    source_match = _source_derived_match(
+        candidate_text,
+        normalized_candidate,
+        passage,
+    )
+    if source_match is None:
+        return None
 
-    return None
+    quote = VerifiedQuote(
+        file_id=candidate.file_id,
+        source_display_name=source.display_name,
+        text=source_match.text,
+    )
+    return _VerifiedQuoteMatch(
+        quote=quote,
+        passage_index=passage_index,
+        start=source_match.start,
+        end=source_match.end,
+        normalized_text=_collapse_whitespace(quote.text),
+    )
 
 
 def verify_quote_candidate(

@@ -2,7 +2,7 @@ import pytest
 
 from src.context.conversation_context import build_conversation_context
 from src.schemas.answer import VDRAnswer
-from src.schemas.evidence import SourceReference
+from src.schemas.evidence import SourceReference, VerifiedEvidenceExcerpt
 from src.schemas.evidence_presentation import (
     VerifiedEvidenceMetric,
     VerifiedEvidencePresentation,
@@ -807,6 +807,136 @@ def test_raw_retrieval_is_complete_exact_and_limited_to_two_passages(
     assert "Third passage" not in [text for text, _ in fake_st.code_calls]
 
 
+def test_completed_selection_renders_roles_and_honest_empty_additional(
+    monkeypatch,
+) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+    source = SourceReference(
+        file_id="file-A",
+        display_name="Report.pdf",
+        evidence=["Full raw passage"],
+        evidence_selection_status="completed",
+        selected_evidence=[
+            VerifiedEvidenceExcerpt(
+                role="best_support",
+                passage_index=0,
+                text="Selected support",
+            )
+        ],
+    )
+
+    chat.render_evidence_tab(source)
+
+    assert fake_st.tabs_calls == []
+    assert [text for text, _ in fake_st.text_calls] == ["Selected support"]
+    assert "**Best supporting passage**" in fake_st.markdown_calls
+    assert "**Additional retrieved context**" in fake_st.markdown_calls
+    assert chat.NO_ADDITIONAL_CONTEXT_MESSAGE in fake_st.caption_calls
+    assert "Full raw passage" not in [text for text, _ in fake_st.text_calls]
+
+
+def test_completed_empty_selection_renders_both_honest_empty_statements(
+    monkeypatch,
+) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+    source = SourceReference(
+        display_name="Report.pdf",
+        evidence=["Raw but not selected"],
+        evidence_selection_status="completed",
+    )
+
+    chat.render_evidence_tab(source)
+
+    assert chat.NO_DIRECT_SUPPORT_MESSAGE in fake_st.caption_calls
+    assert chat.NO_ADDITIONAL_CONTEXT_MESSAGE in fake_st.caption_calls
+    assert fake_st.text_calls == []
+
+
+def test_completed_source_without_raw_evidence_still_shows_empty_statements(
+    monkeypatch,
+) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+    answer = VDRAnswer(
+        answer="Supported answer",
+        source_files=["No retrieval.pdf"],
+        sources=[
+            SourceReference(
+                display_name="No retrieval.pdf",
+                evidence_selection_status="completed",
+            )
+        ],
+    )
+
+    chat.render_answer(answer)
+
+    assert any(
+        label.endswith("No retrieval.pdf")
+        for label in fake_st.expander_labels
+    )
+    assert chat.NO_DIRECT_SUPPORT_MESSAGE in fake_st.caption_calls
+    assert chat.NO_ADDITIONAL_CONTEXT_MESSAGE in fake_st.caption_calls
+
+
+def test_completed_raw_view_maps_roles_to_full_passages_once(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+    source = SourceReference(
+        display_name="Report.pdf",
+        evidence=["Unselected raw", "Selected raw one", "Selected raw two"],
+        evidence_selection_status="completed",
+        selected_evidence=[
+            VerifiedEvidenceExcerpt(
+                role="best_support", passage_index=1, text="Selected"
+            ),
+            VerifiedEvidenceExcerpt(
+                role="additional_context", passage_index=1, text="raw one"
+            ),
+            VerifiedEvidenceExcerpt(
+                role="additional_context", passage_index=2, text="raw two"
+            ),
+        ],
+    )
+
+    chat.render_raw_retrieval(source)
+
+    assert fake_st.code_calls == [
+        ("Selected raw one", {"language": None, "wrap_lines": False}),
+        ("Selected raw two", {"language": None, "wrap_lines": False}),
+    ]
+    assert fake_st.caption_calls == [
+        "Best supporting passage; Additional retrieved context 1",
+        "Additional retrieved context 2",
+    ]
+    assert "Unselected raw" not in [text for text, _ in fake_st.code_calls]
+
+
+def test_completed_raw_view_never_substitutes_for_invalid_index(
+    monkeypatch,
+) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+    source = SourceReference(
+        display_name="Report.pdf",
+        evidence=["Must not be substituted"],
+        evidence_selection_status="completed",
+        selected_evidence=[
+            VerifiedEvidenceExcerpt(
+                role="best_support", passage_index=9, text="Selected"
+            )
+        ],
+    )
+
+    chat.render_raw_retrieval(source)
+
+    assert fake_st.code_calls == []
+    assert fake_st.caption_calls == [
+        "No selected raw passage is available for this source."
+    ]
+
+
 @pytest.mark.parametrize(
     "passage",
     [
@@ -1071,6 +1201,43 @@ def test_raw_evidence_survives_serialized_history_replay_exactly(
             {"language": None, "wrap_lines": False},
         )
     ]
+
+
+def test_selected_evidence_and_raw_mapping_survive_history_replay(
+    monkeypatch,
+) -> None:
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+    answer = VDRAnswer(
+        answer="Supported answer",
+        source_files=["Report.pdf"],
+        sources=[
+            SourceReference(
+                file_id="file-A",
+                display_name="Report.pdf",
+                evidence=["Raw zero", "Full raw selected passage"],
+                evidence_selection_status="completed",
+                selected_evidence=[
+                    VerifiedEvidenceExcerpt(
+                        role="best_support",
+                        passage_index=1,
+                        text="selected passage",
+                    )
+                ],
+            )
+        ],
+    )
+
+    chat.render_chat_history([chat.build_assistant_message(answer)])
+
+    assert ("selected passage", {"width": "stretch"}) in fake_st.text_calls
+    assert fake_st.code_calls == [
+        (
+            "Full raw selected passage",
+            {"language": None, "wrap_lines": False},
+        )
+    ]
+    assert "Raw zero" not in [text for text, _ in fake_st.code_calls]
 
 
 def test_legacy_assistant_message_still_renders(monkeypatch) -> None:

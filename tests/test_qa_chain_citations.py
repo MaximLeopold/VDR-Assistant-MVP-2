@@ -8,16 +8,42 @@ from src.chains import qa_chain
 from src.config.constants import FALLBACK_ANSWER
 from src.ingestion.manifest import VDRFileRecord, VDRManifest
 from src.schemas.answer import VDRAnswer
+from src.schemas.quotation import (
+    EvidenceExcerptCandidate,
+    QuoteCandidate,
+    QuoteSelection,
+)
 
 
 @pytest.fixture(autouse=True)
-def disable_quote_selection(monkeypatch) -> None:
-    """Keep Milestone 1A/1B regression tests isolated from API selection."""
+def install_supported_selection(monkeypatch) -> None:
+    """Keep citation tests offline while satisfying the support gate."""
+
+    def select(**kwargs):
+        if not kwargs["passages"]:
+            return QuoteSelection()
+        passage = kwargs["passages"][0]
+        return QuoteSelection(
+            candidates=[
+                QuoteCandidate(
+                    file_id=passage.file_id,
+                    passage_index=passage.passage_index,
+                    quote=passage.text.strip()[:500],
+                )
+            ],
+            best_support_candidates=[
+                EvidenceExcerptCandidate(
+                    file_id=passage.file_id,
+                    passage_index=passage.passage_index,
+                    text=passage.text,
+                )
+            ],
+        )
 
     monkeypatch.setattr(
         qa_chain,
         "select_quote_candidates",
-        lambda **kwargs: [],
+        select,
     )
 
 
@@ -125,7 +151,8 @@ def test_resolved_citations_are_passed_to_unchanged_validator(
     ]
     assert received["quotes"] == []
     assert "sources" not in received
-    assert answer.source_files == received["source_files"]
+    assert answer.answer == qa_chain.BOTH_SUPPORT_MISSING_ANSWER
+    assert answer.source_files == []
 
 
 def test_search_results_attach_after_successful_validation(monkeypatch) -> None:
@@ -138,7 +165,7 @@ def test_search_results_attach_after_successful_validation(monkeypatch) -> None:
                 search_result(
                     "file-A",
                     "Report.pdf",
-                    "  Retrieved passage  ",
+                    "  Retrieved passage with enough support  ",
                 ),
                 search_result("file-uncited", "Other.pdf", "Unrelated"),
             ],
@@ -156,7 +183,9 @@ def test_search_results_attach_after_successful_validation(monkeypatch) -> None:
     assert answer.sources[0].display_name == (
         "VDR → 01 Finance → Annual Reports → Report.pdf"
     )
-    assert answer.sources[0].evidence == ["  Retrieved passage  "]
+    assert answer.sources[0].evidence == [
+        "  Retrieved passage with enough support  "
+    ]
 
 
 def test_exact_raw_evidence_reaches_structured_answer(monkeypatch) -> None:
@@ -194,10 +223,10 @@ def test_manifest_none_preserves_filename_only_citations(monkeypatch) -> None:
 
     answer = qa_chain.run_qa_chain("Question", "vs-test", manifest=None)
 
-    assert answer.status == "success"
-    assert answer.source_files == ["Report.pdf"]
-    assert answer.sources[0].display_name == "Report.pdf"
-    assert answer.sources[0].evidence == []
+    assert answer.status == "not_found"
+    assert answer.answer == qa_chain.BOTH_SUPPORT_MISSING_ANSWER
+    assert answer.source_files == []
+    assert answer.sources == []
 
 
 def test_no_citations_preserves_not_found_fallback(monkeypatch) -> None:
@@ -240,7 +269,7 @@ def test_retrieved_result_without_citation_does_not_create_success(
     assert answer.sources == []
 
 
-def test_empty_search_results_do_not_invalidate_cited_answer(
+def test_empty_search_results_fail_mandatory_support_gate(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
@@ -254,9 +283,10 @@ def test_empty_search_results_do_not_invalidate_cited_answer(
 
     answer = qa_chain.run_qa_chain("Question", "vs-test")
 
-    assert answer.status == "success"
-    assert answer.source_files == ["Report.pdf"]
-    assert answer.sources[0].evidence == []
+    assert answer.status == "not_found"
+    assert answer.answer == qa_chain.BOTH_SUPPORT_MISSING_ANSWER
+    assert answer.source_files == []
+    assert answer.sources == []
 
 
 def test_structured_sources_are_not_attached_after_failed_validation(

@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import httpx
@@ -7,14 +8,14 @@ from openai import APIConnectionError
 from src.config.settings import OPENAI_MODEL
 from src.retrieval import quote_selector
 from src.schemas.evidence import SourceReference
-from src.schemas.quotation import QuoteCandidate, QuoteSelection
+from src.schemas.quotation import (
+    EvidenceExcerptCandidate,
+    QuoteCandidate,
+    QuoteSelection,
+)
 
 
-def source(
-    file_id: str | None,
-    evidence: list[str],
-    display_name: str = "VDR → Finance → Report.pdf",
-) -> SourceReference:
+def source(file_id, evidence, display_name="Secret Report.pdf"):
     return SourceReference(
         file_id=file_id,
         display_name=display_name,
@@ -33,198 +34,169 @@ def install_fake_client(monkeypatch, response=None, error=None):
                 raise error
             return response
 
-    client = SimpleNamespace(responses=FakeResponses())
-    monkeypatch.setattr(quote_selector, "get_openai_client", lambda: client)
-    return captured
-
-
-def completed_response(candidates=None):
-    return SimpleNamespace(
-        status="completed",
-        output_parsed=QuoteSelection(candidates=candidates or []),
-    )
-
-
-def test_scope_keeps_only_sources_with_file_ids_and_evidence() -> None:
-    sources = [
-        source("file-A", ["  A passage  "]),
-        source(None, ["No identity"]),
-        source("  ", ["Blank identity"]),
-        source("file-empty", []),
-        source("file-blank", ["   "]),
-        source("file-B", ["B passage"]),
-    ]
-
-    bounded = quote_selector.build_quote_evidence_scope(sources)
-
-    assert [item.file_id for item in bounded] == ["file-A", "file-B"]
-    assert [item.evidence for item in bounded] == [
-        ["A passage"],
-        ["B passage"],
-    ]
-
-
-def test_scope_preserves_source_and_ranked_passage_order() -> None:
-    bounded = quote_selector.build_quote_evidence_scope(
-        [
-            source("file-B", ["B first", "B second", "B third"]),
-            source("file-A", ["A first", "A second"]),
-        ]
-    )
-
-    assert [item.file_id for item in bounded] == ["file-B", "file-A"]
-    assert bounded[0].evidence == ["B first", "B second"]
-    assert bounded[1].evidence == ["A first", "A second"]
-
-
-def test_scope_limits_sources_to_four() -> None:
-    bounded = quote_selector.build_quote_evidence_scope(
-        [source(f"file-{index}", [f"Passage {index}"]) for index in range(6)]
-    )
-
-    assert [item.file_id for item in bounded] == [
-        "file-0",
-        "file-1",
-        "file-2",
-        "file-3",
-    ]
-
-
-def test_scope_truncates_passage_without_ellipsis() -> None:
-    passage = "x" * (quote_selector.MAX_QUOTE_PASSAGE_CHARS + 20)
-
-    bounded = quote_selector.build_quote_evidence_scope(
-        [source("file-A", [passage])]
-    )
-
-    assert bounded[0].evidence == [
-        "x" * quote_selector.MAX_QUOTE_PASSAGE_CHARS
-    ]
-    assert "…" not in bounded[0].evidence[0]
-
-
-def test_prompt_allows_three_distinct_candidates_from_one_source() -> None:
-    prompt = quote_selector.PROMPT_PATH.read_text(encoding="utf-8")
-
-    assert "Return at most three candidates." in prompt
-    assert "Multiple candidates may come from the same source" in prompt
-    assert "distinct, complementary support" in prompt
-    assert "Return at most two candidates" not in prompt
-
-
-def test_selector_uses_one_bounded_structured_request(monkeypatch) -> None:
-    candidates = [
-        QuoteCandidate(file_id=f"file-{index}", quote=f"Candidate {index}")
-        for index in range(7)
-    ]
-    captured = install_fake_client(
-        monkeypatch,
-        completed_response(candidates),
-    )
-    display_name = "VDR → C:\\Users\\secret\\Report.pdf"
-    quote_sources = quote_selector.build_quote_evidence_scope(
-        [source("file-A", ["First passage", "Second passage"], display_name)]
-    )
-    answer = "A" * quote_selector.MAX_QUOTE_ANSWER_CHARS + "SECRET_TAIL"
-
-    selected = quote_selector.select_quote_candidates(answer, quote_sources)
-
-    assert captured["calls"] == 1
-    assert captured["model"] == OPENAI_MODEL
-    assert captured["text_format"] is QuoteSelection
-    assert captured["max_output_tokens"] == (
-        quote_selector.MAX_QUOTE_OUTPUT_TOKENS
-    )
-    assert captured["instructions"] == (
-        quote_selector.PROMPT_PATH.read_text(encoding="utf-8")
-    )
-    assert captured["input"].split(
-        "\n\nCited source evidence:", maxsplit=1
-    )[0] == "Answer:\n" + "A" * quote_selector.MAX_QUOTE_ANSWER_CHARS
-    assert "SECRET_TAIL" not in captured["input"]
-    assert "Source ID: file-A" in captured["input"]
-    assert "Passage 1:\nFirst passage" in captured["input"]
-    assert "Passage 2:\nSecond passage" in captured["input"]
-    assert "Report.pdf" not in captured["input"]
-    assert "VDR" not in captured["input"]
-    assert "C:\\Users" not in captured["input"]
-    assert "0.8" not in captured["input"]
-    assert len(selected) == quote_selector.MAX_QUOTE_CANDIDATES_TO_PROCESS
-
-
-def test_empty_scope_does_not_create_client(monkeypatch) -> None:
-    def fail_client_creation():
-        raise AssertionError("client must not be created")
-
     monkeypatch.setattr(
         quote_selector,
         "get_openai_client",
-        fail_client_creation,
+        lambda: SimpleNamespace(responses=FakeResponses()),
+    )
+    return captured
+
+
+def completed(selection=None):
+    return SimpleNamespace(
+        status="completed",
+        output_parsed=selection or QuoteSelection(),
     )
 
-    assert quote_selector.select_quote_candidates("Answer", []) == []
+
+def test_scope_retains_original_zero_based_passage_identity() -> None:
+    passages = quote_selector.build_support_evidence_scope(
+        [source("file-A", ["   ", "Second", "Third"])]
+    )
+
+    assert [(item.file_id, item.passage_index, item.text) for item in passages] == [
+        ("file-A", 1, "Second"),
+        ("file-A", 2, "Third"),
+    ]
+
+
+def test_scope_is_cited_only_ranked_and_bounded() -> None:
+    long_text = "x" * (quote_selector.MAX_SUPPORT_PASSAGE_CHARS + 10)
+    sources = [
+        source("file-A", [long_text] + [f"A{index}" for index in range(8)]),
+        source(None, ["No ID"]),
+        source(" bad ", ["Bad ID"]),
+    ] + [source(f"file-{index}", [str(index)]) for index in range(1, 8)]
+
+    passages = quote_selector.build_support_evidence_scope(sources)
+
+    assert len({item.file_id for item in passages}) == 6
+    assert sum(item.file_id == "file-A" for item in passages) == 6
+    assert passages[0].text == long_text[:3500]
+    assert all(len(item.text) <= 3500 for item in passages)
+
+
+def test_scope_honors_total_character_cap(monkeypatch) -> None:
+    monkeypatch.setattr(quote_selector, "MAX_SUPPORT_TOTAL_PASSAGE_CHARS", 7)
+
+    passages = quote_selector.build_support_evidence_scope(
+        [source("file-A", ["1234", "5678", "x"])]
+    )
+
+    assert [item.text for item in passages] == ["1234"]
+
+
+def test_recent_context_excludes_current_duplicate_and_keeps_two_pairs() -> None:
+    messages = [
+        {"role": "system", "content": "ignore"},
+        {"role": "user", "content": "old"},
+        {"role": "assistant", "content": "one"},
+        {"role": "user", "content": "two"},
+        {"role": "assistant", "content": "three"},
+        {"role": "user", "content": "four"},
+        {"role": "assistant", "content": "five"},
+        {"role": "user", "content": "Current question"},
+    ]
+
+    context = quote_selector.build_recent_selector_context(
+        messages,
+        "Current question",
+    )
+
+    assert context == (
+        "USER: two\n\nASSISTANT: three\n\n"
+        "USER: four\n\nASSISTANT: five"
+    )
+    assert "Current question" not in context
+
+
+def test_selector_uses_one_bounded_typed_request(monkeypatch) -> None:
+    selection = QuoteSelection(
+        candidates=[
+            QuoteCandidate(file_id="file-A", passage_index=0, quote="Quote")
+        ],
+        best_support_candidates=[
+            EvidenceExcerptCandidate(
+                file_id="file-A", passage_index=0, text="Evidence"
+            )
+        ],
+    )
+    captured = install_fake_client(monkeypatch, completed(selection))
+    passages = quote_selector.build_support_evidence_scope(
+        [source("file-A", ["Evidence"])]
+    )
+
+    selected = quote_selector.select_quote_candidates(
+        question="Q" * 4000 + "QUESTION_SECRET",
+        provisional_answer="A" * 8000 + "ANSWER_SECRET",
+        recent_context="C" * 6000 + "CONTEXT_SECRET",
+        passages=passages,
+    )
+
+    payload = json.loads(captured["input"])
+    assert captured["calls"] == 1
+    assert captured["model"] == OPENAI_MODEL
+    assert captured["text_format"] is QuoteSelection
+    assert captured["max_output_tokens"] == 6000
+    assert captured["instructions"] == quote_selector.PROMPT_PATH.read_text(
+        encoding="utf-8"
+    )
+    assert len(payload["current_question"]) == 4000
+    assert len(payload["provisional_answer"]) == 8000
+    assert len(payload["recent_conversation_context"]) == 6000
+    assert payload["retrieved_passages"] == [
+        {"file_id": "file-A", "passage_index": 0, "text": "Evidence"}
+    ]
+    assert "Secret Report.pdf" not in captured["input"]
+    assert selected == selection
+
+
+def test_empty_scope_is_completed_empty_without_client(monkeypatch) -> None:
+    monkeypatch.setattr(
+        quote_selector,
+        "get_openai_client",
+        lambda: pytest.fail("client must not be created"),
+    )
+
+    assert quote_selector.select_quote_candidates(
+        question="Q",
+        provisional_answer="A",
+        recent_context="",
+        passages=[],
+    ) == QuoteSelection()
 
 
 @pytest.mark.parametrize(
-    ("response", "expected"),
+    "response",
     [
-        (completed_response(), []),
-        (SimpleNamespace(status="completed", output_parsed=None), []),
-        (
-            SimpleNamespace(
-                status="completed",
-                output_parsed=None,
-                output=[SimpleNamespace(type="refusal")],
-            ),
-            [],
+        SimpleNamespace(status="incomplete", output_parsed=None),
+        SimpleNamespace(status="failed", output_parsed=None),
+        SimpleNamespace(status="completed", output_parsed=None),
+        SimpleNamespace(status="completed", output_parsed={}),
+        SimpleNamespace(
+            status="completed",
+            output_parsed=QuoteSelection(),
+            output=[SimpleNamespace(type="refusal")],
         ),
-        (SimpleNamespace(status="incomplete", output_parsed=None), []),
-        (SimpleNamespace(status="failed", output_parsed=None), []),
-        (SimpleNamespace(status="completed", output_parsed={}), []),
     ],
 )
-def test_non_successful_or_empty_structured_states_return_no_candidates(
+def test_noncompleted_refused_or_malformed_response_is_processing_failure(
     monkeypatch,
     response,
-    expected,
 ) -> None:
     install_fake_client(monkeypatch, response)
 
     assert quote_selector.select_quote_candidates(
-        "Answer",
-        [source("file-A", ["Evidence passage"])],
-    ) == expected
+        question="Q",
+        provisional_answer="A",
+        recent_context="",
+        passages=quote_selector.build_support_evidence_scope(
+            [source("file-A", ["Evidence"])]
+        ),
+    ) is None
 
 
-def test_structured_validation_error_returns_empty_without_sensitive_log_data(
-    monkeypatch,
-    caplog,
-) -> None:
-    class InvalidResponses:
-        def parse(self, **kwargs):
-            QuoteSelection.model_validate(
-                {"candidates": [{"file_id": "file-secret"}]}
-            )
-
-    monkeypatch.setattr(
-        quote_selector,
-        "get_openai_client",
-        lambda: SimpleNamespace(responses=InvalidResponses()),
-    )
-
-    selected = quote_selector.select_quote_candidates(
-        "Sensitive answer",
-        [source("file-secret", ["Sensitive evidence"])],
-    )
-
-    assert selected == []
-    assert "ValidationError" in caplog.text
-    assert "Sensitive answer" not in caplog.text
-    assert "Sensitive evidence" not in caplog.text
-    assert "file-secret" not in caplog.text
-
-
-def test_openai_api_error_returns_empty_without_sensitive_log_data(
+def test_expected_api_error_is_processing_failure_without_sensitive_log(
     monkeypatch,
     caplog,
 ) -> None:
@@ -233,15 +205,18 @@ def test_openai_api_error_returns_empty_without_sensitive_log_data(
     )
     install_fake_client(monkeypatch, error=error)
 
-    selected = quote_selector.select_quote_candidates(
-        "Sensitive answer",
-        [source("file-secret", ["Sensitive evidence"])],
+    result = quote_selector.select_quote_candidates(
+        question="Sensitive question",
+        provisional_answer="Sensitive answer",
+        recent_context="Sensitive context",
+        passages=quote_selector.build_support_evidence_scope(
+            [source("file-secret", ["Sensitive evidence"])]
+        ),
     )
 
-    assert selected == []
+    assert result is None
     assert "APIConnectionError" in caplog.text
-    assert "Sensitive answer" not in caplog.text
-    assert "Sensitive evidence" not in caplog.text
+    assert "Sensitive" not in caplog.text
     assert "file-secret" not in caplog.text
 
 
@@ -250,6 +225,20 @@ def test_unexpected_programming_error_is_not_hidden(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="programming defect"):
         quote_selector.select_quote_candidates(
-            "Answer",
-            [source("file-A", ["Evidence passage"])],
+            question="Q",
+            provisional_answer="A",
+            recent_context="",
+            passages=quote_selector.build_support_evidence_scope(
+                [source("file-A", ["Evidence"])]
+            ),
         )
+
+
+def test_prompt_requires_all_roles_and_exact_passage_identity() -> None:
+    prompt = quote_selector.PROMPT_PATH.read_text(encoding="utf-8")
+
+    assert "zero-based `passage_index`" in prompt
+    assert "exact contiguous excerpt" in prompt
+    assert "best_support_candidates" in prompt
+    assert "additional_context_candidates" in prompt
+    assert "Do not paraphrase" in prompt

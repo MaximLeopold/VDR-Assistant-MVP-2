@@ -2,7 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from src.schemas.answer import VDRAnswer
-from src.schemas.evidence import SourceReference
+from src.schemas.evidence import SourceReference, VerifiedEvidenceExcerpt
 from src.schemas.evidence_presentation import (
     EvidenceMetricCandidate,
     EvidenceParallelSeriesCandidate,
@@ -117,6 +117,40 @@ def test_old_source_payload_without_presentations_remains_valid() -> None:
     )
 
     assert source.presentations == []
+    assert source.evidence_selection_status == "legacy"
+    assert source.selected_evidence == []
+
+
+def test_completed_empty_selection_is_distinct_and_round_trips() -> None:
+    source = SourceReference(
+        file_id="file-A",
+        display_name="Report.pdf",
+        evidence=["Raw passage"],
+        evidence_selection_status="completed",
+        selected_evidence=[],
+    )
+
+    restored = SourceReference.model_validate(source.model_dump(mode="json"))
+
+    assert restored.evidence_selection_status == "completed"
+    assert restored.selected_evidence == []
+
+
+def test_selected_evidence_role_index_and_source_text_round_trip() -> None:
+    excerpt = VerifiedEvidenceExcerpt(
+        role="best_support",
+        passage_index=2,
+        text="Source-derived text",
+    )
+    source = SourceReference(
+        display_name="Report.pdf",
+        evidence_selection_status="completed",
+        selected_evidence=[excerpt],
+    )
+
+    restored = SourceReference.model_validate(source.model_dump(mode="json"))
+
+    assert restored.selected_evidence == [excerpt]
 
 
 def test_verified_presentation_round_trips_through_answer_json() -> None:

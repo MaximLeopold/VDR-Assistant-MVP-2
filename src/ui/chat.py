@@ -37,6 +37,14 @@ FORMATTED_SOURCE_EXCERPTS_CAPTION = (
     "Source text formatted for readability and sometimes shortened—"
     "not an AI-written summary."
 )
+NO_DIRECT_SUPPORT_MESSAGE = (
+    "No directly supporting excerpt was selected from the retrieved passages "
+    "for this source."
+)
+NO_ADDITIONAL_CONTEXT_MESSAGE = (
+    "No additional relevant context was identified in the retrieved passages "
+    "for this source."
+)
 
 _MARKDOWN_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 _MARKDOWN_DELIMITER_CELL_RE = re.compile(r"^:?-{3,}:?$")
@@ -478,7 +486,40 @@ def render_evidence_passage(
 
 
 def render_evidence_tab(source: SourceReference) -> None:
-    """Render up to two ranked passages with restrained hierarchy."""
+    """Render persisted selections, or the legacy first-two fallback."""
+
+    if source.evidence_selection_status == "completed":
+        st.markdown(FORMATTED_SOURCE_EXCERPTS_HEADING)
+        st.caption(FORMATTED_SOURCE_EXCERPTS_CAPTION)
+
+        best_support = [
+            excerpt
+            for excerpt in source.selected_evidence
+            if excerpt.role == "best_support"
+        ]
+        additional_context = [
+            excerpt
+            for excerpt in source.selected_evidence
+            if excerpt.role == "additional_context"
+        ]
+
+        st.markdown("**Best supporting passage**")
+        if best_support:
+            for excerpt in best_support:
+                render_evidence_passage(excerpt.text, label=None)
+        else:
+            st.caption(NO_DIRECT_SUPPORT_MESSAGE)
+
+        st.markdown("**Additional retrieved context**")
+        if additional_context:
+            for index, excerpt in enumerate(additional_context, start=1):
+                render_evidence_passage(
+                    excerpt.text,
+                    label=f"Additional context {index}",
+                )
+        else:
+            st.caption(NO_ADDITIONAL_CONTEXT_MESSAGE)
+        return
 
     passages = source.evidence[:MAX_VISIBLE_EVIDENCE_PASSAGES]
     if not passages or not any(clean_evidence_text(item) for item in passages):
@@ -502,6 +543,34 @@ def render_evidence_tab(source: SourceReference) -> None:
 
 def render_raw_retrieval(source: SourceReference) -> None:
     """Render exact stored File Search strings for auditability."""
+
+    if source.evidence_selection_status == "completed":
+        associations_by_passage: dict[int, list[str]] = {}
+        additional_number = 0
+        for excerpt in source.selected_evidence:
+            if excerpt.role == "best_support":
+                label = "Best supporting passage"
+            else:
+                additional_number += 1
+                label = f"Additional retrieved context {additional_number}"
+
+            passage_index = excerpt.passage_index
+            if not (0 <= passage_index < len(source.evidence)):
+                continue
+            associations_by_passage.setdefault(passage_index, []).append(label)
+
+        if not associations_by_passage:
+            st.caption("No selected raw passage is available for this source.")
+            return
+
+        for passage_index, associations in associations_by_passage.items():
+            st.caption("; ".join(associations))
+            st.code(
+                source.evidence[passage_index],
+                language=None,
+                wrap_lines=False,
+            )
+        return
 
     for index, passage in enumerate(
         source.evidence[:MAX_VISIBLE_EVIDENCE_PASSAGES],
@@ -552,8 +621,10 @@ def _render_answer_content(answer: VDRAnswer) -> None:
     if answer.sources:
         st.markdown("**Sources**")
         for source in answer.sources:
-            if not source.evidence and not _has_structured_content(
-                source.presentations
+            if (
+                source.evidence_selection_status == "legacy"
+                and not source.evidence
+                and not _has_structured_content(source.presentations)
             ):
                 st.markdown(f"- {source.display_name}")
                 continue

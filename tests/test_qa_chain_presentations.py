@@ -13,7 +13,11 @@ from src.schemas.evidence_presentation import (
     VerifiedEvidencePresentation,
     VerifiedEvidenceTable,
 )
-from src.schemas.quotation import QuoteCandidate
+from src.schemas.quotation import (
+    EvidenceExcerptCandidate,
+    QuoteCandidate,
+    QuoteSelection,
+)
 
 
 ELIGIBLE_TEXT = (
@@ -26,11 +30,33 @@ QUOTE_TEXT = (
 
 
 @pytest.fixture(autouse=True)
-def default_noop_quote_selector(monkeypatch) -> None:
+def default_supported_quote_selector(monkeypatch) -> None:
+    def select(**kwargs):
+        if not kwargs["passages"]:
+            return QuoteSelection()
+        passage = kwargs["passages"][0]
+        quote_text = passage.text.strip()[:500]
+        return QuoteSelection(
+            candidates=[
+                QuoteCandidate(
+                    file_id=passage.file_id,
+                    passage_index=passage.passage_index,
+                    quote=quote_text,
+                )
+            ],
+            best_support_candidates=[
+                EvidenceExcerptCandidate(
+                    file_id=passage.file_id,
+                    passage_index=passage.passage_index,
+                    text=passage.text,
+                )
+            ],
+        )
+
     monkeypatch.setattr(
         qa_chain,
         "select_quote_candidates",
-        lambda **kwargs: [],
+        select,
     )
 
 
@@ -262,7 +288,7 @@ def test_all_rejected_candidates_leave_answer_unchanged(monkeypatch) -> None:
     assert answer.sources[0].evidence == [ELIGIBLE_TEXT]
 
 
-def test_quote_ineligibility_does_not_prevent_phase_2a(monkeypatch) -> None:
+def test_failed_support_gate_prevents_phase_2a(monkeypatch) -> None:
     monkeypatch.setattr(
         qa_chain,
         "search_vector_store",
@@ -286,8 +312,9 @@ def test_quote_ineligibility_does_not_prevent_phase_2a(monkeypatch) -> None:
 
     answer = qa_chain.run_qa_chain("Question", "vs-test")
 
-    assert answer.status == "success"
-    assert len(called) == 1
+    assert answer.status == "not_found"
+    assert answer.answer == qa_chain.BOTH_SUPPORT_MISSING_ANSWER
+    assert called == []
 
 
 def test_phase_2a_ineligibility_does_not_prevent_quotations(
@@ -304,9 +331,18 @@ def test_phase_2a_ineligibility_does_not_prevent_quotations(
     monkeypatch.setattr(
         qa_chain,
         "select_quote_candidates",
-        lambda **kwargs: [
-            QuoteCandidate(file_id="file-A", quote=QUOTE_TEXT)
-        ],
+        lambda **kwargs: QuoteSelection(
+            candidates=[
+                QuoteCandidate(
+                    file_id="file-A", passage_index=0, quote=QUOTE_TEXT
+                )
+            ],
+            best_support_candidates=[
+                EvidenceExcerptCandidate(
+                    file_id="file-A", passage_index=0, text=QUOTE_TEXT
+                )
+            ],
+        ),
     )
 
     def fail_selector(passages):
@@ -343,9 +379,18 @@ def test_verified_quotes_and_structure_are_attached_independently(
     monkeypatch.setattr(
         qa_chain,
         "select_quote_candidates",
-        lambda **kwargs: [
-            QuoteCandidate(file_id="file-A", quote=QUOTE_TEXT)
-        ],
+        lambda **kwargs: QuoteSelection(
+            candidates=[
+                QuoteCandidate(
+                    file_id="file-A", passage_index=0, quote=QUOTE_TEXT
+                )
+            ],
+            best_support_candidates=[
+                EvidenceExcerptCandidate(
+                    file_id="file-A", passage_index=0, text=QUOTE_TEXT
+                )
+            ],
+        ),
     )
     presentation = VerifiedEvidencePresentation(
         passage_index=1,

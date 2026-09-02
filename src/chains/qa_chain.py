@@ -7,10 +7,11 @@ This module orchestrates the full Q&A flow:
 3. Search the active OpenAI vector store.
 4. Extract answer text, citations, and retrieved passages.
 5. Resolve and validate cited source files.
-6. Attach supplementary evidence to successful answers.
-7. Select and locally verify concise source quotations.
-8. Select and locally verify structured evidence presentations.
-9. Return a VDRAnswer object.
+6. Treat the validated primary answer as provisional.
+7. Select and locally verify quotations and supporting excerpts.
+8. Release the answer only when mandatory support checks pass.
+9. Select and locally verify structured evidence presentations.
+10. Return a VDRAnswer object.
 """
 
 from pathlib import Path
@@ -25,6 +26,7 @@ from src.retrieval.citation_resolver import (
 )
 from src.retrieval.openai_file_search import search_vector_store
 from src.retrieval.quote_selector import (
+    build_recent_selector_context,
     build_quote_evidence_scope,
     select_quote_candidates,
 )
@@ -39,10 +41,48 @@ from src.presentation.evidence_verifier import (
 )
 from src.schemas.answer import VDRAnswer
 from src.validation.answer_validator import validate_answer
+from src.validation.evidence_selection_verifier import (
+    verify_evidence_selection,
+)
 from src.validation.quote_verifier import verify_quote_candidates
 
 
 PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "qa.md"
+QUOTE_SUPPORT_MISSING_ANSWER = (
+    "I could not find a verified quotation in the retrieved passages, so I "
+    "cannot provide a supported answer."
+)
+BEST_SUPPORT_MISSING_ANSWER = (
+    "I could not find a directly supporting source passage in the retrieved "
+    "results, so I cannot provide a supported answer."
+)
+BOTH_SUPPORT_MISSING_ANSWER = (
+    "I could not find enough verified supporting material in the retrieved "
+    "passages to provide an answer."
+)
+SUPPORT_PROCESSING_FAILED_ANSWER = (
+    "I could not validate the supporting material because evidence processing "
+    "failed. Please try again."
+)
+
+
+def _withheld_answer(
+    message: str,
+    *,
+    processing_failed: bool = False,
+) -> VDRAnswer:
+    """Return a safe result containing none of the provisional answer state."""
+
+    return VDRAnswer(
+        answer=message,
+        source_files=[],
+        sources=[],
+        quotes=[],
+        verified_quotes=[],
+        warnings=[],
+        status="error" if processing_failed else "not_found",
+        workflow="qa",
+    )
 
 
 def load_qa_prompt() -> str:
@@ -117,24 +157,54 @@ def run_qa_chain(
             source_files=source_files,
             search_results=search_results,
         )
-        validated_answer = validated_answer.model_copy(
-            update={"sources": sources}
-        )
-
-        quote_sources = build_quote_evidence_scope(sources)
-        if quote_sources:
-            candidates = select_quote_candidates(
-                answer=validated_answer.answer,
-                quote_sources=quote_sources,
+        try:
+            support_scope = build_quote_evidence_scope(sources)
+            selector_context = build_recent_selector_context(
+                messages,
+                question,
             )
+            selection = select_quote_candidates(
+                question=question,
+                provisional_answer=validated_answer.answer,
+                recent_context=selector_context,
+                passages=support_scope,
+            )
+            if selection is None:
+                return _withheld_answer(
+                    SUPPORT_PROCESSING_FAILED_ANSWER,
+                    processing_failed=True,
+                )
+
             verified_quotes = verify_quote_candidates(
-                candidates=candidates,
+                candidates=selection.candidates,
                 quote_sources=sources,
             )
-            if verified_quotes:
-                validated_answer = validated_answer.model_copy(
-                    update={"verified_quotes": verified_quotes}
-                )
+            evidence_verification = verify_evidence_selection(
+                selection=selection,
+                sources=sources,
+            )
+        except Exception:
+            return _withheld_answer(
+                SUPPORT_PROCESSING_FAILED_ANSWER,
+                processing_failed=True,
+            )
+
+        has_quote_support = bool(verified_quotes)
+        has_best_support = evidence_verification.best_support_count > 0
+        if not has_quote_support and not has_best_support:
+            return _withheld_answer(BOTH_SUPPORT_MISSING_ANSWER)
+        if not has_quote_support:
+            return _withheld_answer(QUOTE_SUPPORT_MISSING_ANSWER)
+        if not has_best_support:
+            return _withheld_answer(BEST_SUPPORT_MISSING_ANSWER)
+
+        sources = evidence_verification.sources
+        validated_answer = validated_answer.model_copy(
+            update={
+                "sources": sources,
+                "verified_quotes": verified_quotes,
+            }
+        )
 
         presentation_scope = build_evidence_presentation_scope(sources)
         if not presentation_scope:

@@ -23,8 +23,13 @@ def source(
 def candidate(
     quote: str = BASE_QUOTE,
     file_id: str = "file-A",
+    passage_index: int = 0,
 ) -> QuoteCandidate:
-    return QuoteCandidate(file_id=file_id, quote=quote)
+    return QuoteCandidate(
+        file_id=file_id,
+        passage_index=passage_index,
+        quote=quote,
+    )
 
 
 def test_exact_substring_verifies_with_source_derived_text() -> None:
@@ -122,7 +127,7 @@ def test_unicode_symbol_substitution_does_not_verify() -> None:
     ) is None
 
 
-def test_highest_ranked_passage_is_checked_first(monkeypatch) -> None:
+def test_only_identified_passage_is_checked(monkeypatch) -> None:
     calls = []
 
     def fake_match(candidate_text, normalized_candidate, passage):
@@ -138,13 +143,12 @@ def test_highest_ranked_passage_is_checked_first(monkeypatch) -> None:
     monkeypatch.setattr(quote_verifier, "_source_derived_match", fake_match)
 
     verified = quote_verifier.verify_quote_candidate(
-        candidate(),
+        candidate(passage_index=1),
         [source(evidence=["first", "second"])],
     )
 
-    assert verified is not None
-    assert verified.text == "Source-derived first match"
-    assert calls == ["first"]
+    assert verified is None
+    assert calls == ["second"]
 
 
 @pytest.mark.parametrize(
@@ -284,7 +288,7 @@ def test_containment_applies_only_within_the_same_source_passage() -> None:
     sources = [source(evidence=[short, long])]
 
     verified = quote_verifier.verify_quote_candidates(
-        [candidate(short), candidate(long)],
+        [candidate(short), candidate(long, passage_index=1)],
         sources,
     )
 
