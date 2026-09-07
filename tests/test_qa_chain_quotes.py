@@ -205,9 +205,8 @@ def test_combined_selector_does_not_run_after_failed_validation(
 @pytest.mark.parametrize(
     ("quotes", "best", "expected"),
     [
-        (False, True, qa_chain.QUOTE_SUPPORT_MISSING_ANSWER),
         (True, False, qa_chain.BEST_SUPPORT_MISSING_ANSWER),
-        (False, False, qa_chain.BOTH_SUPPORT_MISSING_ANSWER),
+        (False, False, qa_chain.BEST_SUPPORT_MISSING_ANSWER),
     ],
 )
 def test_mandatory_gate_withholds_provisional_answer(
@@ -220,7 +219,7 @@ def test_mandatory_gate_withholds_provisional_answer(
     monkeypatch.setattr(
         qa_chain,
         "select_quote_candidates",
-        lambda **kwargs: supported_selection(quotes=quotes, best=best),
+        lambda **kwargs: supported_selection(quotes=quotes, best=best, additional=True),
     )
 
     answer = qa_chain.run_qa_chain("Question", "vs-test")
@@ -257,6 +256,22 @@ def test_processing_failure_is_fail_closed(
     assert answer.warnings == []
 
 
+@pytest.mark.parametrize("verifier", ["verify_quote_candidates", "verify_evidence_selection"])
+def test_normal_verification_exception_still_fails_closed(monkeypatch, verifier):
+    install_supported_search(monkeypatch)
+
+    def fail(**kwargs):
+        raise RuntimeError("Synthetic verification failure")
+
+    monkeypatch.setattr(qa_chain, verifier, fail)
+    answer = qa_chain.run_qa_chain("Question", "vs-test")
+
+    assert answer.status == "error"
+    assert answer.answer == qa_chain.SUPPORT_PROCESSING_FAILED_ANSWER
+    assert answer.sources == []
+    assert "PROVISIONAL SECRET" not in answer.model_dump_json()
+
+
 def test_success_persists_verified_roles_without_mutating_raw_evidence(
     monkeypatch,
 ) -> None:
@@ -287,6 +302,67 @@ def test_success_persists_verified_roles_without_mutating_raw_evidence(
     assert len(answer.verified_quotes) == 1
 
 
+@pytest.mark.parametrize("quotes", [True, False])
+def test_best_support_releases_answer_with_or_without_quotation(monkeypatch, quotes):
+    install_supported_search(monkeypatch)
+    monkeypatch.setattr(
+        qa_chain, "select_quote_candidates",
+        lambda **kwargs: supported_selection(quotes=quotes),
+    )
+
+    answer = qa_chain.run_qa_chain("Question", "vs-test")
+
+    assert answer.status == "success"
+    assert answer.answer == "PROVISIONAL SECRET"
+    assert bool(answer.verified_quotes) is quotes
+    assert answer.sources[0].selected_evidence[0].role == "best_support"
+
+
+def test_rejected_quote_does_not_veto_best_support(monkeypatch):
+    install_supported_search(monkeypatch)
+    selection = supported_selection()
+    selection.candidates[0].quote = "This quotation does not occur in the source."
+    monkeypatch.setattr(qa_chain, "select_quote_candidates", lambda **kwargs: selection)
+
+    answer = qa_chain.run_qa_chain("Question", "vs-test")
+
+    assert answer.status == "success"
+    assert answer.answer == "PROVISIONAL SECRET"
+    assert answer.verified_quotes == []
+
+
+def test_weak_and_additional_only_sources_do_not_veto_another_sources_best(monkeypatch):
+    monkeypatch.setattr(
+        qa_chain, "search_vector_store",
+        lambda **kwargs: response(
+            citation("file-empty", "Empty.pdf"),
+            citation("file-context", "Context.pdf"),
+            citation("file-A", "Offer.pdf"),
+            results=[
+                search_result("file-empty", "Unselected material"),
+                search_result("file-context", "Relevant complementary context."),
+                search_result("file-A", VERIFIABLE_TEXT),
+            ],
+        ),
+    )
+    selection = supported_selection(quotes=False)
+    selection.best_support_candidates.insert(0, EvidenceExcerptCandidate(
+        file_id="file-context", passage_index=0, text="Invalid Best proposal",
+    ))
+    selection.additional_context_candidates.append(EvidenceExcerptCandidate(
+        file_id="file-context", passage_index=0, text="Relevant complementary context.",
+    ))
+    monkeypatch.setattr(qa_chain, "select_quote_candidates", lambda **kwargs: selection)
+
+    answer = qa_chain.run_qa_chain("Question", "vs-test")
+
+    assert answer.status == "success"
+    assert answer.source_files == ["Empty.pdf", "Context.pdf", "Offer.pdf"]
+    assert answer.sources[0].selected_evidence == []
+    assert [item.role for item in answer.sources[1].selected_evidence] == ["additional_context"]
+    assert [item.role for item in answer.sources[2].selected_evidence] == ["best_support"]
+
+
 def test_wrong_passage_identity_cannot_substitute_matching_passage(
     monkeypatch,
 ) -> None:
@@ -305,7 +381,7 @@ def test_wrong_passage_identity_cannot_substitute_matching_passage(
 
     answer = qa_chain.run_qa_chain("Question", "vs-test")
 
-    assert answer.answer == qa_chain.BOTH_SUPPORT_MISSING_ANSWER
+    assert answer.answer == qa_chain.BEST_SUPPORT_MISSING_ANSWER
     assert "PROVISIONAL SECRET" not in answer.model_dump_json()
 
 
@@ -366,7 +442,7 @@ def test_no_eligible_evidence_fails_both_support_checks(monkeypatch) -> None:
     answer = qa_chain.run_qa_chain("Question", "vs-test")
 
     assert captured["calls"] == 1
-    assert answer.answer == qa_chain.BOTH_SUPPORT_MISSING_ANSWER
+    assert answer.answer == qa_chain.BEST_SUPPORT_MISSING_ANSWER
     assert answer.sources == []
 
 

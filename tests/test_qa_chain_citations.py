@@ -151,7 +151,7 @@ def test_resolved_citations_are_passed_to_unchanged_validator(
     ]
     assert received["quotes"] == []
     assert "sources" not in received
-    assert answer.answer == qa_chain.BOTH_SUPPORT_MISSING_ANSWER
+    assert answer.answer == qa_chain.BEST_SUPPORT_MISSING_ANSWER
     assert answer.source_files == []
 
 
@@ -224,7 +224,7 @@ def test_manifest_none_preserves_filename_only_citations(monkeypatch) -> None:
     answer = qa_chain.run_qa_chain("Question", "vs-test", manifest=None)
 
     assert answer.status == "not_found"
-    assert answer.answer == qa_chain.BOTH_SUPPORT_MISSING_ANSWER
+    assert answer.answer == qa_chain.BEST_SUPPORT_MISSING_ANSWER
     assert answer.source_files == []
     assert answer.sources == []
 
@@ -284,7 +284,7 @@ def test_empty_search_results_fail_mandatory_support_gate(
     answer = qa_chain.run_qa_chain("Question", "vs-test")
 
     assert answer.status == "not_found"
-    assert answer.answer == qa_chain.BOTH_SUPPORT_MISSING_ANSWER
+    assert answer.answer == qa_chain.BEST_SUPPORT_MISSING_ANSWER
     assert answer.source_files == []
     assert answer.sources == []
 

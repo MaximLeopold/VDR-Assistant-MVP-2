@@ -288,6 +288,69 @@ def test_all_rejected_candidates_leave_answer_unchanged(monkeypatch) -> None:
     assert answer.sources[0].evidence == [ELIGIBLE_TEXT]
 
 
+@pytest.mark.parametrize("stage", [
+    "build_evidence_presentation_scope",
+    "select_evidence_presentations",
+    "verify_evidence_presentations",
+    "attach_verified_presentations",
+])
+@pytest.mark.parametrize("with_quotes", [True, False])
+def test_unexpected_structured_failure_preserves_all_normal_support(
+    monkeypatch, stage, with_quotes,
+) -> None:
+    monkeypatch.setattr(
+        qa_chain, "search_vector_store",
+        lambda **kwargs: response(
+            citation("file-A", "Report.pdf"),
+            citation("file-B", "Other.pdf"),
+            results=[search_result("file-A", "Report.pdf", ELIGIBLE_TEXT)],
+        ),
+    )
+    selection = QuoteSelection(
+        candidates=[QuoteCandidate(
+            file_id="file-A", passage_index=0, quote=ELIGIBLE_TEXT,
+        )] if with_quotes else [],
+        best_support_candidates=[EvidenceExcerptCandidate(
+            file_id="file-A", passage_index=0, text=ELIGIBLE_TEXT,
+        )],
+        additional_context_candidates=[EvidenceExcerptCandidate(
+            file_id="file-A", passage_index=0, text="EBITDA 4,905 Margin 17.5%",
+        )],
+    )
+    monkeypatch.setattr(qa_chain, "select_quote_candidates", lambda **kwargs: selection)
+    monkeypatch.setattr(
+        qa_chain, "select_evidence_presentations",
+        lambda passages: EvidencePresentationSelection(),
+    )
+    supported_answer = qa_chain.run_qa_chain("Question", "vs-test")
+    assert supported_answer.status == "success"
+
+    if stage == "attach_verified_presentations":
+        monkeypatch.setattr(
+            qa_chain, "verify_evidence_presentations",
+            lambda **kwargs: {"file-A": [VerifiedEvidencePresentation(passage_index=0)]},
+        )
+    calls = []
+
+    def fail(*args, **kwargs):
+        calls.append(stage)
+        raise RuntimeError("Sensitive exception details must not reach the user")
+
+    monkeypatch.setattr(qa_chain, stage, fail)
+    answer = qa_chain.run_qa_chain("Question", "vs-test")
+
+    assert calls == [stage]
+    assert answer == supported_answer.model_copy(update={
+        "warnings": [qa_chain.STRUCTURED_PROCESSING_FAILED_WARNING],
+    })
+    assert answer.source_files == ["Report.pdf", "Other.pdf"]
+    assert [item.role for item in answer.sources[0].selected_evidence] == [
+        "best_support", "additional_context",
+    ]
+    assert all(not source.presentations for source in answer.sources)
+    assert "Sensitive" not in answer.model_dump_json()
+
+
 def test_failed_support_gate_prevents_phase_2a(monkeypatch) -> None:
     monkeypatch.setattr(
         qa_chain,
@@ -313,7 +376,7 @@ def test_failed_support_gate_prevents_phase_2a(monkeypatch) -> None:
     answer = qa_chain.run_qa_chain("Question", "vs-test")
 
     assert answer.status == "not_found"
-    assert answer.answer == qa_chain.BOTH_SUPPORT_MISSING_ANSWER
+    assert answer.answer == qa_chain.BEST_SUPPORT_MISSING_ANSWER
     assert called == []
 
 

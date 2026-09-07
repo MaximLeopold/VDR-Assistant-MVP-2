@@ -25,26 +25,41 @@ VERIFIED_TABLE_AVAILABLE_CAPTION = (
     "Independently verified source figures are available under Structured."
 )
 EVIDENCE_HARD_MAX_CHARS = 1800
+ORIGINAL_PASSAGES_LABEL = "Original retrieved passages"
 EVIDENCE_TRUNCATION_CAPTION = (
-    "Full extracted passage is available under Raw retrieval."
+    f"Full extracted passage is available under {ORIGINAL_PASSAGES_LABEL}."
 )
 FRAGMENTED_LAYOUT_NOTICE = (
     "The original source layout was not preserved in this passage. "
-    "Review Raw retrieval for the exact extraction."
+    f"Review {ORIGINAL_PASSAGES_LABEL} for the exact extraction."
 )
 FORMATTED_SOURCE_EXCERPTS_HEADING = "**Formatted source excerpts**"
 FORMATTED_SOURCE_EXCERPTS_CAPTION = (
     "Source text formatted for readability and sometimes shortened—"
     "not an AI-written summary."
 )
-NO_DIRECT_SUPPORT_MESSAGE = (
-    "No directly supporting excerpt was selected from the retrieved passages "
-    "for this source."
+FORMATTED_SOURCE_EXCERPTS_DISCLOSURE = (
+    f"{FORMATTED_SOURCE_EXCERPTS_HEADING} &nbsp; "
+    f":gray[ⓘ {FORMATTED_SOURCE_EXCERPTS_CAPTION}]\n\n---"
 )
-NO_ADDITIONAL_CONTEXT_MESSAGE = (
-    "No additional relevant context was identified in the retrieved passages "
-    "for this source."
-)
+BEST_SUPPORT_LABEL = ":green[**Best supporting passage**]"
+ADDITIONAL_CONTEXT_LABEL = ":orange[**Additional retrieved context**]"
+
+# Keyed containers contain only the untouched synthesized-answer Markdown.
+SYNTHESIZED_ANSWER_STYLES = """
+<style>
+[class*="st-key-vdr-answer-"] h1 { font-size: 1.5rem; }
+[class*="st-key-vdr-answer-"] h2 { font-size: 1.35rem; }
+[class*="st-key-vdr-answer-"] h3 { font-size: 1.2rem; }
+[class*="st-key-vdr-answer-"] h4 { font-size: 1.1rem; }
+[class*="st-key-vdr-answer-"] h5 { font-size: 1.05rem; }
+[class*="st-key-vdr-answer-"] h6 { font-size: 1rem; }
+[class*="st-key-vdr-answer-"] :is(h1, h2, h3, h4, h5, h6) {
+    line-height: 1.3;
+    padding: 0.5rem 0 0.35rem;
+}
+</style>
+"""
 
 _MARKDOWN_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 _MARKDOWN_DELIMITER_CELL_RE = re.compile(r"^:?-{3,}:?$")
@@ -178,6 +193,14 @@ def _has_structured_content(
         presentation.metrics or presentation.tables
         for presentation in presentations
     )
+
+
+def _has_useful_evidence(source: SourceReference) -> bool:
+    """Keep citation visibility separate from verified evidence visibility."""
+
+    return any(
+        excerpt.text.strip() for excerpt in source.selected_evidence
+    ) or _has_structured_content(source.presentations)
 
 
 def _metric_display_label(
@@ -489,8 +512,10 @@ def render_evidence_tab(source: SourceReference) -> None:
     """Render persisted selections, or the legacy first-two fallback."""
 
     if source.evidence_selection_status == "completed":
-        st.markdown(FORMATTED_SOURCE_EXCERPTS_HEADING)
-        st.caption(FORMATTED_SOURCE_EXCERPTS_CAPTION)
+        if not source.selected_evidence:
+            if _has_structured_content(source.presentations):
+                st.caption("Verified source figures are available under Structured.")
+            return
 
         best_support = [
             excerpt
@@ -503,35 +528,28 @@ def render_evidence_tab(source: SourceReference) -> None:
             if excerpt.role == "additional_context"
         ]
 
-        st.markdown("**Best supporting passage**")
         if best_support:
+            st.markdown(BEST_SUPPORT_LABEL)
             for excerpt in best_support:
                 render_evidence_passage(excerpt.text, label=None)
-        else:
-            st.caption(NO_DIRECT_SUPPORT_MESSAGE)
 
-        st.markdown("**Additional retrieved context**")
         if additional_context:
+            st.markdown(ADDITIONAL_CONTEXT_LABEL)
             for index, excerpt in enumerate(additional_context, start=1):
                 render_evidence_passage(
                     excerpt.text,
                     label=f"Additional context {index}",
                 )
-        else:
-            st.caption(NO_ADDITIONAL_CONTEXT_MESSAGE)
         return
 
     passages = source.evidence[:MAX_VISIBLE_EVIDENCE_PASSAGES]
     if not passages or not any(clean_evidence_text(item) for item in passages):
         return
 
-    st.markdown(FORMATTED_SOURCE_EXCERPTS_HEADING)
-    st.caption(FORMATTED_SOURCE_EXCERPTS_CAPTION)
-
     if len(passages) == 1:
         render_evidence_passage(
             passages[0],
-            label="Best supporting passage",
+            label=BEST_SUPPORT_LABEL,
         )
         return
     labels = ["Best supporting passage", "Additional retrieved context"]
@@ -587,7 +605,7 @@ def _render_evidence_views(source: SourceReference) -> None:
     tab_labels = ["Evidence"]
     if has_structured_content:
         tab_labels.append("Structured")
-    tab_labels.append("Raw retrieval")
+    tab_labels.append(ORIGINAL_PASSAGES_LABEL)
     tabs = st.tabs(tab_labels, default=tab_labels[0])
 
     if has_structured_content:
@@ -606,10 +624,14 @@ def _render_evidence_views(source: SourceReference) -> None:
         render_raw_retrieval(source)
 
 
-def _render_answer_content(answer: VDRAnswer) -> None:
+def _render_answer_content(
+    answer: VDRAnswer, *, answer_key: str = "vdr-answer-current"
+) -> None:
     """Render answer content without creating a chat-message container."""
 
-    st.markdown(answer.answer)
+    st.html(SYNTHESIZED_ANSWER_STYLES)
+    with st.container(key=answer_key):
+        st.markdown(answer.answer)
     render_answer_trust_caption(answer)
 
     if answer.verified_quotes:
@@ -618,33 +640,23 @@ def _render_answer_content(answer: VDRAnswer) -> None:
                 st.text(f"“{quote.text}”", width="stretch")
                 st.caption(f"Source: {quote.source_display_name}")
 
-    if answer.sources:
-        st.markdown("**Sources**")
-        for source in answer.sources:
-            if (
-                source.evidence_selection_status == "legacy"
-                and not source.evidence
-                and not _has_structured_content(source.presentations)
-            ):
-                st.markdown(f"- {source.display_name}")
-                continue
-
+    evidence_sources = [source for source in answer.sources if _has_useful_evidence(source)]
+    if evidence_sources:
+        st.markdown("**Evidence**")
+        st.markdown(FORMATTED_SOURCE_EXCERPTS_DISCLOSURE)
+        for source in evidence_sources:
             with st.expander(
                 f"Retrieved evidence — {source.display_name}"
             ):
                 _render_evidence_views(
                     source,
                 )
-    elif answer.source_files:
-        st.markdown("**Sources**")
-        for source in answer.source_files:
-            st.markdown(f"- {source}")
 
 
 def render_chat_history(messages: list[dict]) -> None:
     """Render structured and legacy conversation history."""
 
-    for message in messages:
+    for index, message in enumerate(messages):
         with st.chat_message(message["role"]):
             payload = message.get("vdr_answer")
             if message.get("role") == "assistant" and payload is not None:
@@ -653,7 +665,7 @@ def render_chat_history(messages: list[dict]) -> None:
                 except ValidationError:
                     st.markdown(message["content"])
                 else:
-                    _render_answer_content(answer)
+                    _render_answer_content(answer, answer_key=f"vdr-answer-history-{index}")
             else:
                 st.markdown(message["content"])
 

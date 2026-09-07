@@ -9,7 +9,7 @@ This module orchestrates the full Q&A flow:
 5. Resolve and validate cited source files.
 6. Treat the validated primary answer as provisional.
 7. Select and locally verify quotations and supporting excerpts.
-8. Release the answer only when mandatory support checks pass.
+8. Release the answer when at least one verified Best excerpt exists.
 9. Select and locally verify structured evidence presentations.
 10. Return a VDRAnswer object.
 """
@@ -48,21 +48,17 @@ from src.validation.quote_verifier import verify_quote_candidates
 
 
 PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "qa.md"
-QUOTE_SUPPORT_MISSING_ANSWER = (
-    "I could not find a verified quotation in the retrieved passages, so I "
-    "cannot provide a supported answer."
-)
 BEST_SUPPORT_MISSING_ANSWER = (
     "I could not find a directly supporting source passage in the retrieved "
     "results, so I cannot provide a supported answer."
 )
-BOTH_SUPPORT_MISSING_ANSWER = (
-    "I could not find enough verified supporting material in the retrieved "
-    "passages to provide an answer."
-)
 SUPPORT_PROCESSING_FAILED_ANSWER = (
     "I could not validate the supporting material because evidence processing "
     "failed. Please try again."
+)
+STRUCTURED_PROCESSING_FAILED_WARNING = (
+    "Structured evidence could not be displayed. The answer and verified "
+    "source excerpts remain available."
 )
 
 
@@ -189,12 +185,7 @@ def run_qa_chain(
                 processing_failed=True,
             )
 
-        has_quote_support = bool(verified_quotes)
         has_best_support = evidence_verification.best_support_count > 0
-        if not has_quote_support and not has_best_support:
-            return _withheld_answer(BOTH_SUPPORT_MISSING_ANSWER)
-        if not has_quote_support:
-            return _withheld_answer(QUOTE_SUPPORT_MISSING_ANSWER)
         if not has_best_support:
             return _withheld_answer(BEST_SUPPORT_MISSING_ANSWER)
 
@@ -206,25 +197,36 @@ def run_qa_chain(
             }
         )
 
-        presentation_scope = build_evidence_presentation_scope(sources)
-        if not presentation_scope:
-            return validated_answer
+        # Structured output is optional; keep normal support intact on failure.
+        try:
+            presentation_scope = build_evidence_presentation_scope(sources)
+            if not presentation_scope:
+                return validated_answer
 
-        presentation_selection = select_evidence_presentations(
-            presentation_scope
-        )
-        presentations_by_file_id = verify_evidence_presentations(
-            selection=presentation_selection,
-            sources=sources,
-            passage_scope=presentation_scope,
-        )
-        if presentations_by_file_id:
-            sources = attach_verified_presentations(
-                sources=sources,
-                presentations_by_file_id=presentations_by_file_id,
+            presentation_selection = select_evidence_presentations(
+                presentation_scope
             )
+            presentations_by_file_id = verify_evidence_presentations(
+                selection=presentation_selection,
+                sources=sources,
+                passage_scope=presentation_scope,
+            )
+            if presentations_by_file_id:
+                sources = attach_verified_presentations(
+                    sources=sources,
+                    presentations_by_file_id=presentations_by_file_id,
+                )
+                validated_answer = validated_answer.model_copy(
+                    update={"sources": sources}
+                )
+        except Exception:
             validated_answer = validated_answer.model_copy(
-                update={"sources": sources}
+                update={
+                    "warnings": [
+                        *validated_answer.warnings,
+                        STRUCTURED_PROCESSING_FAILED_WARNING,
+                    ]
+                }
             )
 
         return validated_answer

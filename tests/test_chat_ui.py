@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+
 import pytest
 
 from src.context.conversation_context import build_conversation_context
@@ -34,6 +36,16 @@ class FakeStreamlit:
         self.metric_calls = []
         self.table_calls = []
         self.events = []
+        self.html_calls = []
+
+    def html(self, body):
+        self.html_calls.append(body)
+
+    @contextmanager
+    def container(self, **kwargs):
+        self.events.append(("container_enter", kwargs))
+        yield
+        self.events.append(("container_exit", kwargs))
 
     def chat_message(self, role):
         self.chat_roles.append(role)
@@ -97,6 +109,17 @@ def structured_answer() -> VDRAnswer:
                     "Second ranked passage",
                     "Third passage",
                     "Fourth passage",
+                ],
+                evidence_selection_status="completed",
+                selected_evidence=[
+                    VerifiedEvidenceExcerpt(
+                        role="best_support", passage_index=0,
+                        text="First ranked passage\nwith Unicode €42.6 million",
+                    ),
+                    VerifiedEvidenceExcerpt(
+                        role="additional_context", passage_index=1,
+                        text="Second ranked passage",
+                    ),
                 ],
             ),
             SourceReference(
@@ -289,15 +312,7 @@ def test_render_answer_uses_safe_source_level_evidence_expander(
     assert fake_st.expander_labels == [
         "Retrieved evidence — VDR → Finance → Annual Report.pdf"
     ]
-    assert fake_st.events.index(
-        (
-            "expander",
-            "Retrieved evidence — VDR → Finance → Annual Report.pdf",
-        )
-    ) < fake_st.events.index(
-        ("markdown", "- VDR → Legal → Agreement.pdf")
-    )
-    assert "- VDR → Legal → Agreement.pdf" in fake_st.markdown_calls
+    assert "- VDR → Legal → Agreement.pdf" not in fake_st.markdown_calls
     assert fake_st.text_calls == [
         (
             "First ranked passage\nwith Unicode €42.6 million",
@@ -317,21 +332,17 @@ def test_render_answer_uses_safe_source_level_evidence_expander(
     ]
     assert fake_st.tabs_calls == [
         (
-            ["Evidence", "Raw retrieval"],
+            ["Evidence", "Original retrieved passages"],
             {"default": "Evidence"},
-        ),
-        (
-            ["Best supporting passage", "Additional retrieved context"],
-            {"default": "Best supporting passage"},
         ),
     ]
     assert fake_st.caption_calls == [
         chat.SYNTHESIZED_ANSWER_CAPTION,
-        chat.FORMATTED_SOURCE_EXCERPTS_CAPTION,
-        "Raw passage 1",
-        "Raw passage 2",
+        "Additional context 1",
+        "Best supporting passage",
+        "Additional retrieved context 1",
     ]
-    assert chat.FORMATTED_SOURCE_EXCERPTS_HEADING in fake_st.markdown_calls
+    assert chat.FORMATTED_SOURCE_EXCERPTS_DISCLOSURE in fake_st.markdown_calls
     assert all("Showing" not in caption for caption in fake_st.caption_calls)
     assert all("of 4" not in caption for caption in fake_st.caption_calls)
 
@@ -349,7 +360,7 @@ def test_render_answer_uses_safe_source_level_evidence_expander(
     assert structured_answer().sources[0].evidence[2] == "Third passage"
 
 
-def test_verified_presentations_add_default_structured_tab(
+def test_verified_presentations_add_structured_tab_with_evidence_default(
     monkeypatch,
 ) -> None:
     fake_st = FakeStreamlit()
@@ -362,12 +373,8 @@ def test_verified_presentations_add_default_structured_tab(
     ]
     assert fake_st.tabs_calls == [
         (
-            ["Evidence", "Structured", "Raw retrieval"],
+            ["Evidence", "Structured", "Original retrieved passages"],
             {"default": "Evidence"},
-        ),
-        (
-            ["Best supporting passage", "Additional retrieved context"],
-            {"default": "Best supporting passage"},
         ),
     ]
     assert fake_st.caption_calls.count(
@@ -472,12 +479,8 @@ def test_empty_presentations_do_not_add_structured_tab(monkeypatch) -> None:
 
     assert fake_st.tabs_calls == [
         (
-            ["Evidence", "Raw retrieval"],
+            ["Evidence", "Original retrieved passages"],
             {"default": "Evidence"},
-        ),
-        (
-            ["Best supporting passage", "Additional retrieved context"],
-            {"default": "Best supporting passage"},
         ),
     ]
     assert fake_st.columns_calls == []
@@ -514,7 +517,7 @@ def test_each_verified_component_type_enables_structured_tab(
     chat.render_answer(answer)
 
     assert fake_st.tabs_calls[0] == (
-        ["Evidence", "Structured", "Raw retrieval"],
+        ["Evidence", "Structured", "Original retrieved passages"],
         {"default": "Evidence"},
     )
 
@@ -530,7 +533,7 @@ def test_verified_quotes_render_safely_between_answer_and_sources(
 
     answer_event = ("markdown", "Supported answer")
     heading_event = ("expander", "Verified quotations")
-    source_event = ("markdown", "**Sources**")
+    source_event = ("markdown", "**Evidence**")
     assert fake_st.events.index(answer_event) < fake_st.events.index(heading_event)
     assert fake_st.events.index(heading_event) < fake_st.events.index(source_event)
     assert (
@@ -581,10 +584,10 @@ def test_verified_quotations_remain_before_structured_sources(
     chat.render_answer(answer)
 
     quote_heading = ("expander", "Verified quotations")
-    source_heading = ("markdown", "**Sources**")
+    source_heading = ("markdown", "**Evidence**")
     structured_tabs = (
         "tabs",
-        ["Evidence", "Structured", "Raw retrieval"],
+        ["Evidence", "Structured", "Original retrieved passages"],
     )
     assert fake_st.events.index(quote_heading) < fake_st.events.index(
         source_heading
@@ -720,12 +723,9 @@ def test_single_passage_renders_directly_without_inner_navigation(
 
     assert fake_st.tabs_calls == []
     assert fake_st.caption_calls == [
-        chat.FORMATTED_SOURCE_EXCERPTS_CAPTION,
-        "Best supporting passage",
+        chat.BEST_SUPPORT_LABEL,
     ]
-    assert fake_st.markdown_calls == [
-        chat.FORMATTED_SOURCE_EXCERPTS_HEADING
-    ]
+    assert fake_st.markdown_calls == []
     assert fake_st.text_calls == [
         ("Only passage", {"width": "stretch"})
     ]
@@ -750,17 +750,8 @@ def test_two_passages_use_ranked_inner_tabs_and_ignore_later_passages(
             {"default": "Best supporting passage"},
         )
     ]
-    assert fake_st.caption_calls == [
-        chat.FORMATTED_SOURCE_EXCERPTS_CAPTION
-    ]
-    assert fake_st.events.index(
-        ("markdown", chat.FORMATTED_SOURCE_EXCERPTS_HEADING)
-    ) < fake_st.events.index(
-        (
-            "tabs",
-            ["Best supporting passage", "Additional retrieved context"],
-        )
-    )
+    assert fake_st.caption_calls == []
+    assert chat.FORMATTED_SOURCE_EXCERPTS_DISCLOSURE not in fake_st.markdown_calls
     assert [text for text, _ in fake_st.text_calls] == ["Best", "Second"]
     rendered = "\n".join(str(value) for _, value in fake_st.events)
     assert "Third" not in rendered
@@ -807,7 +798,7 @@ def test_raw_retrieval_is_complete_exact_and_limited_to_two_passages(
     assert "Third passage" not in [text for text, _ in fake_st.code_calls]
 
 
-def test_completed_selection_renders_roles_and_honest_empty_additional(
+def test_completed_selection_renders_best_without_empty_additional(
     monkeypatch,
 ) -> None:
     fake_st = FakeStreamlit()
@@ -830,13 +821,13 @@ def test_completed_selection_renders_roles_and_honest_empty_additional(
 
     assert fake_st.tabs_calls == []
     assert [text for text, _ in fake_st.text_calls] == ["Selected support"]
-    assert "**Best supporting passage**" in fake_st.markdown_calls
-    assert "**Additional retrieved context**" in fake_st.markdown_calls
-    assert chat.NO_ADDITIONAL_CONTEXT_MESSAGE in fake_st.caption_calls
+    assert chat.BEST_SUPPORT_LABEL in fake_st.markdown_calls
+    assert chat.ADDITIONAL_CONTEXT_LABEL not in fake_st.markdown_calls
+    assert fake_st.caption_calls == []
     assert "Full raw passage" not in [text for text, _ in fake_st.text_calls]
 
 
-def test_completed_empty_selection_renders_both_honest_empty_statements(
+def test_completed_empty_selection_omits_empty_role_statements(
     monkeypatch,
 ) -> None:
     fake_st = FakeStreamlit()
@@ -849,12 +840,12 @@ def test_completed_empty_selection_renders_both_honest_empty_statements(
 
     chat.render_evidence_tab(source)
 
-    assert chat.NO_DIRECT_SUPPORT_MESSAGE in fake_st.caption_calls
-    assert chat.NO_ADDITIONAL_CONTEXT_MESSAGE in fake_st.caption_calls
+    assert fake_st.caption_calls == []
+    assert fake_st.markdown_calls == []
     assert fake_st.text_calls == []
 
 
-def test_completed_source_without_raw_evidence_still_shows_empty_statements(
+def test_completed_source_without_raw_evidence_has_no_central_expander(
     monkeypatch,
 ) -> None:
     fake_st = FakeStreamlit()
@@ -872,12 +863,9 @@ def test_completed_source_without_raw_evidence_still_shows_empty_statements(
 
     chat.render_answer(answer)
 
-    assert any(
-        label.endswith("No retrieval.pdf")
-        for label in fake_st.expander_labels
-    )
-    assert chat.NO_DIRECT_SUPPORT_MESSAGE in fake_st.caption_calls
-    assert chat.NO_ADDITIONAL_CONTEXT_MESSAGE in fake_st.caption_calls
+    assert fake_st.expander_labels == []
+    assert fake_st.tabs_calls == []
+    assert fake_st.markdown_calls == ["Supported answer"]
 
 
 def test_completed_raw_view_maps_roles_to_full_passages_once(monkeypatch) -> None:
@@ -1023,7 +1011,7 @@ def test_ambiguous_one_word_lines_render_preformatted_with_notice(
     assert fake_st.table_calls == []
 
 
-def test_empty_cleaned_historical_passage_remains_available_as_raw(
+def test_empty_historical_passage_is_stored_but_has_no_central_expander(
     monkeypatch,
 ) -> None:
     fake_st = FakeStreamlit()
@@ -1043,13 +1031,10 @@ def test_empty_cleaned_historical_passage_remains_available_as_raw(
     chat.render_answer(answer)
 
     assert fake_st.text_calls == []
-    assert fake_st.code_calls == [
-        (" \t\r\n ", {"language": None, "wrap_lines": False})
-    ]
-    assert fake_st.caption_calls == [
-        chat.SYNTHESIZED_ANSWER_CAPTION,
-        "Raw passage 1",
-    ]
+    assert fake_st.code_calls == []
+    assert fake_st.expander_labels == []
+    assert answer.sources[0].evidence == [" \t\r\n "]
+    assert fake_st.caption_calls == [chat.SYNTHESIZED_ANSWER_CAPTION]
 
 
 def test_source_without_evidence_has_no_evidence_expander(monkeypatch) -> None:
@@ -1070,7 +1055,7 @@ def test_source_without_evidence_has_no_evidence_expander(monkeypatch) -> None:
 
     assert fake_st.expander_labels == []
     assert fake_st.tabs_calls == []
-    assert "- VDR → Legal → Agreement.pdf" in fake_st.markdown_calls
+    assert "- VDR → Legal → Agreement.pdf" not in fake_st.markdown_calls
 
 
 def test_assistant_message_serializes_complete_answer() -> None:
@@ -1144,7 +1129,7 @@ def test_verified_presentations_survive_serialized_history_replay(
     restored = VDRAnswer.model_validate(message["vdr_answer"])
     assert restored == answer
     assert fake_st.tabs_calls[0] == (
-        ["Evidence", "Structured", "Raw retrieval"],
+        ["Evidence", "Structured", "Original retrieved passages"],
         {"default": "Evidence"},
     )
     assert fake_st.metric_calls == [
@@ -1189,6 +1174,10 @@ def test_raw_evidence_survives_serialized_history_replay_exactly(
                 file_id="file-A",
                 display_name="Report.pdf",
                 evidence=[raw_passage],
+                evidence_selection_status="completed",
+                selected_evidence=[VerifiedEvidenceExcerpt(
+                    role="best_support", passage_index=0, text="Evidence €42.6m",
+                )],
             )
         ],
     )
@@ -1304,7 +1293,7 @@ def test_old_structured_payload_without_verified_quotes_renders(
 
     assert "Old structured answer" in fake_st.markdown_calls
     assert "Verified quotations" not in fake_st.expander_labels
-    assert "- Report.pdf" in fake_st.markdown_calls
+    assert "- Report.pdf" not in fake_st.markdown_calls
 
 
 def test_legacy_quotes_are_not_rendered(monkeypatch) -> None:
@@ -1361,6 +1350,157 @@ def test_sidebar_remains_citation_only(monkeypatch) -> None:
     assert "file-A" not in rendered
 
 
+@pytest.mark.parametrize("replay", [False, True])
+@pytest.mark.parametrize("empty_status", ["legacy", "completed"])
+def test_mixed_sources_keep_all_citations_but_only_useful_central_evidence(
+    monkeypatch, replay, empty_status,
+) -> None:
+    fake_st = FakeStreamlit()
+    sidebar = FakeSidebar()
+    monkeypatch.setattr(chat, "st", fake_st)
+    monkeypatch.setattr(source_panel.st, "sidebar", sidebar)
+
+    def fail_api(*args, **kwargs):
+        pytest.fail("Rendering and replay must not create an OpenAI client")
+
+    monkeypatch.setattr("openai.OpenAI.__init__", fail_api)
+    best = structured_answer().sources[0]
+    additional = SourceReference(
+        file_id="file-context", display_name="Context.pdf",
+        evidence=["Complementary context."],
+        evidence_selection_status="completed",
+        selected_evidence=[VerifiedEvidenceExcerpt(
+            role="additional_context", passage_index=0,
+            text="Complementary context.",
+        )],
+    )
+    structured = answer_with_verified_presentations().sources[0].model_copy(update={
+        "file_id": "file-structured", "display_name": "Figures.pdf",
+        "selected_evidence": [],
+    })
+    empty = SourceReference(
+        file_id="file-empty", display_name="Empty.pdf",
+        evidence=["Unselected raw passage"],
+        evidence_selection_status=empty_status,
+        presentations=[VerifiedEvidencePresentation(passage_index=0)],
+    )
+    sources = [best, empty, additional, structured]
+    answer = VDRAnswer(
+        answer="Supported answer", sources=sources,
+        source_files=[source.display_name for source in sources],
+    )
+    original = answer.model_dump(mode="json")
+
+    if replay:
+        chat.render_chat_history([chat.build_assistant_message(answer)])
+    else:
+        chat.render_answer(answer)
+    source_panel.render_source_panel(answer)
+
+    assert fake_st.expander_labels == [
+        f"Retrieved evidence — {source.display_name}"
+        for source in [best, additional, structured]
+    ]
+    assert sidebar.info_calls == [f"📄 {name}" for name in answer.source_files]
+    assert ("Complementary context.", {"width": "stretch"}) in fake_st.text_calls
+    assert fake_st.metric_calls
+    assert fake_st.table_calls
+    assert "Unselected raw passage" not in str(fake_st.events)
+    assert answer.model_dump(mode="json") == original
+    assert fake_st.markdown_calls.count(chat.FORMATTED_SOURCE_EXCERPTS_DISCLOSURE) == 1
+    disclosure_index = fake_st.events.index(
+        ("markdown", chat.FORMATTED_SOURCE_EXCERPTS_DISCLOSURE)
+    )
+    assert fake_st.events.index(("markdown", "**Evidence**")) < disclosure_index
+    assert disclosure_index < fake_st.events.index(
+        ("expander", fake_st.expander_labels[0])
+    )
+
+
+def test_additional_only_has_no_missing_best_state_and_preserves_raw_mapping(monkeypatch):
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+    raw = "Prefix. First context. Second context. Suffix."
+    source = SourceReference(
+        file_id="file-context", display_name="Context.pdf", evidence=[raw],
+        evidence_selection_status="completed",
+        selected_evidence=[
+            VerifiedEvidenceExcerpt(role="additional_context", passage_index=0, text=text)
+            for text in ["First context.", "Second context."]
+        ],
+    )
+
+    chat.render_evidence_tab(source)
+    chat.render_raw_retrieval(source)
+
+    assert chat.ADDITIONAL_CONTEXT_LABEL in fake_st.markdown_calls
+    assert chat.BEST_SUPPORT_LABEL not in fake_st.markdown_calls
+    assert [text for text, _ in fake_st.text_calls] == ["First context.", "Second context."]
+    assert fake_st.code_calls == [(raw, {"language": None, "wrap_lines": False})]
+    assert fake_st.caption_calls[-1] == (
+        "Additional retrieved context 1; Additional retrieved context 2"
+    )
+    assert not any("No " in caption for caption in fake_st.caption_calls)
+
+
+def test_disclosure_keeps_heading_and_explanation_in_one_block(monkeypatch):
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+
+    chat.render_answer(structured_answer())
+
+    disclosure = [body for body in fake_st.markdown_calls if "Formatted source excerpts" in body]
+    assert len(disclosure) == 1
+    assert chat.FORMATTED_SOURCE_EXCERPTS_CAPTION in disclosure[0]
+    assert chat.FORMATTED_SOURCE_EXCERPTS_CAPTION not in fake_st.caption_calls
+
+
+@pytest.mark.parametrize("replay", [False, True])
+def test_answer_markdown_is_unchanged_and_alone_in_heading_style_container(monkeypatch, replay):
+    fake_st = FakeStreamlit()
+    monkeypatch.setattr(chat, "st", fake_st)
+    markdown = "# Business Model\nBody text.\n## Revenue Streams\n### Revenue Model Evolution"
+    answer = structured_answer().model_copy(update={
+        "answer": markdown,
+        "verified_quotes": [VerifiedQuote(
+            file_id="file-A", source_display_name="Report.pdf", text="Exact source text.",
+        )],
+    })
+    original = answer.model_dump(mode="json")
+
+    if replay:
+        chat.render_chat_history([chat.build_assistant_message(answer)])
+    else:
+        chat.render_answer(answer)
+
+    start = next(i for i, event in enumerate(fake_st.events) if event[0] == "container_enter")
+    end = next(i for i, event in enumerate(fake_st.events) if event[0] == "container_exit")
+    assert fake_st.events[start + 1:end] == [("markdown", markdown)]
+    assert fake_st.html_calls == [chat.SYNTHESIZED_ANSWER_STYLES]
+    assert fake_st.events.index(("expander", "Verified quotations")) > end
+    assert fake_st.events.index(("markdown", "**Evidence**")) > end
+    assert answer.model_dump(mode="json") == original
+
+
+def test_heading_containers_support_multiple_history_answers_and_current_answer():
+    from streamlit.testing.v1 import AppTest
+
+    def app_script():
+        from src.schemas.answer import VDRAnswer
+        from src.ui.chat import build_assistant_message, render_answer, render_chat_history
+
+        answer = VDRAnswer(answer="# Business Model\n## Revenue Streams\nBody text.")
+        message = build_assistant_message(answer)
+        render_chat_history([message, message])
+        render_answer(answer)
+
+    app = AppTest.from_function(app_script).run(timeout=10)
+    assert not app.exception
+    assert [item.value for item in app.markdown] == [
+        "# Business Model\n## Revenue Streams\nBody text."
+    ] * 3
+
+
 def test_converted_parallel_table_reuses_structured_history_renderer(
     monkeypatch,
 ) -> None:
@@ -1398,7 +1538,7 @@ def test_converted_parallel_table_reuses_structured_history_renderer(
 
     assert fake_st.tabs_calls == [
         (
-            ["Evidence", "Structured", "Raw retrieval"],
+            ["Evidence", "Structured", "Original retrieved passages"],
             {"default": "Evidence"},
         )
     ]
