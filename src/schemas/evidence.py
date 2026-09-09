@@ -24,11 +24,17 @@ class VerifiedEvidenceExcerpt(BaseModel):
     text: str
 
 
+class ExcelSourceProvenance(BaseModel):
+    original_relative_path: str
+    worksheet_name: str
+
+
 class SourceReference(BaseModel):
     """A cited source and its associated retrieved passages."""
 
     file_id: str | None = None
     display_name: str
+    excel_provenance: ExcelSourceProvenance | None = None
     evidence: list[str] = Field(default_factory=list)
     presentations: list[VerifiedEvidencePresentation] = Field(
         default_factory=list

@@ -70,6 +70,10 @@ def assess_manifest_readiness(
 ) -> CaseReadiness:
     """Assess a loaded manifest without mutating local or remote state."""
 
+    try:
+        manifest = VDRManifest.model_validate(manifest.model_dump())
+    except ValueError:
+        return _empty_readiness("Manifest v2 is structurally invalid.")
     reasons: list[str] = []
     root = Path(vdr_folder).expanduser().resolve()
 
@@ -82,11 +86,18 @@ def assess_manifest_readiness(
     except InvalidVectorStoreIdError:
         reasons.append("The manifest does not contain a vector-store ID.")
 
-    supported = [
-        record
-        for record in manifest.files
-        if record.classification_status == "supported"
-    ]
+    supported = []
+    for record in manifest.files:
+        if record.classification_status == "supported":
+            supported.append(record)
+        elif record.classification_status == "preprocess":
+            prep = record.excel_preprocessing
+            if prep is None or prep.status not in {"completed", "excluded"}:
+                reasons.append(
+                    f"{record.relative_path}: Excel preprocessing is incomplete."
+                )
+            elif prep.status == "completed":
+                supported.extend(record.derived_artifacts)
     classification_error_count = sum(
         record.classification_status == "error" for record in manifest.files
     )
@@ -99,32 +110,28 @@ def assess_manifest_readiness(
     unuploaded_count = sum(
         record.upload_status == "not_uploaded" for record in supported
     )
-    uploading_count = sum(
-        record.upload_status == "uploading" for record in supported
-    )
+    uploading_count = sum(record.upload_status == "uploading" for record in supported)
     indexing_in_progress_count = sum(
         record.indexing_status == "in_progress" for record in supported
     )
     failed_count = sum(
-        record.upload_status == "failed"
-        or record.indexing_status == "failed"
+        record.upload_status == "failed" or record.indexing_status == "failed"
         for record in supported
     )
 
     if not supported:
-        reasons.append("At least one supported document is required.")
+        reasons.append("At least one searchable target is required.")
     if classification_error_count:
         reasons.append("The manifest contains classification errors.")
     if any(
-        not isinstance(record.openai_file_id, str)
-        or not record.openai_file_id.strip()
+        not isinstance(record.openai_file_id, str) or not record.openai_file_id.strip()
         for record in supported
     ):
-        reasons.append("Every supported document must have an OpenAI file ID.")
+        reasons.append("Every searchable target must have an OpenAI file ID.")
     if any(record.upload_status != "uploaded" for record in supported):
-        reasons.append("Every supported document must have completed upload.")
+        reasons.append("Every searchable target must have completed upload.")
     if any(record.indexing_status != "completed" for record in supported):
-        reasons.append("Every supported document must have completed indexing.")
+        reasons.append("Every searchable target must have completed indexing.")
 
     return CaseReadiness(
         is_ready=not reasons,

@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -46,6 +45,7 @@ def main() -> int:
     print(f"Case name: {manifest.case_name}")
     print(f"Total files: {manifest.total_files}")
     print(f"Supported files: {manifest.supported_files}")
+    print(f"Excel workbooks to prepare: {manifest.preprocess_files}")
     print(f"Unsupported files: {manifest.unsupported_files}")
     print(f"Ignored files: {manifest.ignored_files}")
     print(f"Target manifest: {paths.manifest_path}")
@@ -60,9 +60,7 @@ def main() -> int:
 
     confirmation = input("Type CREATE to write this manifest: ").strip()
     if confirmation != "CREATE":
-        print(
-            "Manifest creation aborted. No folder or manifest was created."
-        )
+        print("Manifest creation aborted. No folder or manifest was created.")
         return 2
 
     try:

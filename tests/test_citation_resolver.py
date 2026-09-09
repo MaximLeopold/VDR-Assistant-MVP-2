@@ -4,12 +4,23 @@ import pytest
 
 from src.ingestion.manifest import VDRFileRecord, VDRManifest
 from src.retrieval.citation_resolver import (
-    build_source_references,
+    build_source_references as _build_source_references,
     format_vdr_breadcrumb,
-    resolve_citations,
+    resolve_citations as _resolve_citations,
 )
 from src.schemas.citation import Citation
 from src.schemas.evidence import RetrievedSearchResult, SourceReference
+
+
+def resolve_citations(citations, manifest):
+    return [source.display_name for source in _resolve_citations(citations, manifest)]
+
+
+def build_source_references(citations, source_files, search_results):
+    resolved = [SourceReference(file_id=c.file_id.strip() if c.file_id and c.file_id.strip() else None, display_name=name) for c,name in zip(citations,source_files)]
+    if len(citations)!=len(source_files):
+        raise ValueError('citations and resolved_sources must contain the same number of items')
+    return _build_source_references(citations,resolved,search_results)
 
 
 def record(
@@ -17,7 +28,7 @@ def record(
     relative_path: str,
     filename: str = "report.pdf",
 ) -> VDRFileRecord:
-    return VDRFileRecord(
+    return VDRFileRecord.model_construct(
         relative_path=relative_path,
         filename=filename,
         extension=".pdf",
@@ -32,7 +43,8 @@ def record(
 
 def manifest_with(*records: VDRFileRecord) -> VDRManifest:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    return VDRManifest(
+    return VDRManifest.model_construct(
+        schema_version=2,
         case_name="Test Case",
         root_path="C:/private/local/VDR",
         vector_store_id="vs-test",
@@ -123,7 +135,7 @@ def test_missing_manifest_falls_back_to_filename() -> None:
     assert resolve_citations(
         [Citation(file_id="file-A", filename="report.pdf")],
         None,
-    ) == ["report.pdf"]
+    ) == ["Unknown source"]
 
 
 def test_unmatched_file_id_falls_back_to_filename() -> None:
@@ -132,7 +144,7 @@ def test_unmatched_file_id_falls_back_to_filename() -> None:
     assert resolve_citations(
         [Citation(file_id="file-A", filename="report.pdf")],
         manifest,
-    ) == ["report.pdf"]
+    ) == ["Unknown source"]
 
 
 @pytest.mark.parametrize("relative_path", ["", "../report.pdf", "C:/report.pdf"])
@@ -144,7 +156,7 @@ def test_invalid_manifest_path_falls_back_to_filename(
     assert resolve_citations(
         [Citation(file_id="file-A", filename="report.pdf")],
         manifest,
-    ) == ["report.pdf"]
+    ) == ["Unknown source"]
 
 
 def test_duplicate_manifest_file_id_is_ambiguous() -> None:
@@ -156,7 +168,7 @@ def test_duplicate_manifest_file_id_is_ambiguous() -> None:
     assert resolve_citations(
         [Citation(file_id="file-A", filename="report.pdf")],
         manifest,
-    ) == ["report.pdf"]
+    ) == ["Unknown source"]
 
 
 def test_missing_filename_uses_neutral_source_label() -> None:

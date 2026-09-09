@@ -46,6 +46,7 @@ def make_manifest(vdr_folder: Path) -> VDRManifest:
         last_error="Temporary upload error",
     )
     return VDRManifest(
+        schema_version=2,
         case_name="Project Gamma",
         root_path=str(vdr_folder),
         vector_store_id="vs_123",
@@ -131,7 +132,7 @@ def test_save_load_round_trip_is_portable_and_preserves_state(
     loaded = load_manifest(vdr_folder)
 
     assert "absolute_path" not in persisted["files"][0]
-    assert loaded.files[0].absolute_path is None
+    assert "absolute_path" not in loaded.files[0].model_dump()
     assert loaded.files[0].relative_path == "Legal/agreement.pdf"
     assert loaded.files[0].openai_file_id == "file_123"
     assert loaded.files[0].upload_status == "failed"
@@ -152,21 +153,21 @@ def test_backup_rotation_keeps_only_the_previous_current_state(
     manifest = make_manifest(vdr_folder)
 
     create_manifest(manifest, vdr_folder)
-    manifest.vector_store_id = "vs_second"
+    manifest.files[0].last_error = "second"
     save_manifest(manifest, vdr_folder)
 
     first_backup = load_backup_manifest(vdr_folder)
-    assert first_backup.vector_store_id == "vs_123"
+    assert first_backup.files[0].last_error == "Temporary upload error"
 
-    manifest.vector_store_id = "vs_third"
+    manifest.files[0].last_error = "third"
     save_manifest(manifest, vdr_folder)
 
     paths = derive_manifest_paths(vdr_folder)
     second_backup = load_backup_manifest(vdr_folder)
     current = load_manifest(vdr_folder)
 
-    assert second_backup.vector_store_id == "vs_second"
-    assert current.vector_store_id == "vs_third"
+    assert second_backup.files[0].last_error == "second"
+    assert current.files[0].last_error == "third"
     assert sorted(path.name for path in paths.assistant_folder.iterdir()) == [
         "manifest.backup.json",
         "manifest.json",
@@ -190,7 +191,7 @@ def test_load_errors_distinguish_missing_json_schema_and_version(
         load_manifest(vdr_folder)
 
     manifest = make_manifest(vdr_folder)
-    write_manifest_data(paths.manifest_path, manifest, schema_version=2)
+    write_manifest_data(paths.manifest_path, manifest, schema_version=1)
     with pytest.raises(UnsupportedSchemaVersionError):
         load_manifest(vdr_folder)
 
@@ -206,9 +207,10 @@ def test_load_ignores_unavailable_stored_root_without_changing_timestamps(
 ) -> None:
     _, vdr_folder = make_case(tmp_path)
     manifest = make_manifest(vdr_folder)
+    path=create_manifest(manifest,vdr_folder)
     manifest.root_path = "Z:/another-users-sync/Project Gamma/Seller Export"
-
-    create_manifest(manifest, vdr_folder)
+    # Simulate a copied portable snapshot; loading does not require the stored root.
+    write_manifest_data(path,manifest)
     loaded = load_manifest(vdr_folder)
 
     assert loaded.root_path == manifest.root_path
@@ -274,14 +276,12 @@ def test_relink_reconstructs_paths_without_requiring_files(
     _, new_vdr = make_case(tmp_path / "new-machine")
     relinked = relink_manifest(loaded, new_vdr)
 
-    assert loaded.files[0].absolute_path is None
+    assert "absolute_path" not in loaded.files[0].model_dump()
     assert relinked.root_path == str(new_vdr.resolve())
-    assert relinked.files[0].absolute_path == str(
-        (new_vdr / "Legal" / "agreement.pdf").resolve()
-    )
+    assert "absolute_path" not in relinked.files[0].model_dump()
     assert relinked.files[0].relative_path == "Legal/agreement.pdf"
     assert relinked.files[0].openai_file_id == "file_123"
-    assert not Path(relinked.files[0].absolute_path).exists()
+    assert not (new_vdr / relinked.files[0].relative_path).exists()
 
 
 def test_relink_rejects_invalid_root_and_path_traversal(

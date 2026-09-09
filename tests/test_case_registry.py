@@ -17,6 +17,8 @@ def make_manifest(
 ) -> VDRManifest:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     return VDRManifest(
+        schema_version=2,
+        snapshot_state="sealed",
         case_name=case_name,
         root_path=str(vdr_folder.resolve()),
         vector_store_id=vector_store_id,

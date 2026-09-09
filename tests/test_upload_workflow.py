@@ -1,3 +1,4 @@
+from src.ingestion.upload_targets import UploadTargetKey
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -175,7 +176,7 @@ def test_preparation_is_read_only_deterministic_and_probes_all_candidates(
 
     plan = prepare_manifest_upload(vdr_folder)
 
-    assert [candidate.relative_path for candidate in plan.candidates] == [
+    assert [candidate.key.source_relative_path for candidate in plan.candidates] == [
         "Nested/a.pdf",
         "z.pdf",
     ]
@@ -206,12 +207,13 @@ def test_preparation_blocks_unsafe_stored_paths(
     vdr_folder = make_case(tmp_path, ("document.pdf",))
     manifest = load_manifest(vdr_folder)
     manifest.files[0].relative_path = relative_path
-    save_manifest(manifest, vdr_folder)
-
-    plan = prepare_manifest_upload(vdr_folder)
-
-    assert plan.blockers
-    assert not plan.candidates
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        save_manifest(manifest,vdr_folder)
+    # Externally corrupted manifests fail closed at loading, before planning.
+    (vdr_folder.parent/'VDR Assistant'/'manifest.json').write_text(manifest.model_dump_json(),encoding='utf-8')
+    with pytest.raises(UploadPreparationError):
+        prepare_manifest_upload(vdr_folder)
 
 
 def test_preparation_blocks_unreadable_file(tmp_path: Path, monkeypatch) -> None:
@@ -242,14 +244,14 @@ def test_preparation_requires_owned_manifest_and_vector_store(tmp_path: Path) ->
     blank = make_case(tmp_path / "blank", ("document.pdf",))
     manifest = load_manifest(blank)
     manifest.vector_store_id = None
-    save_manifest(manifest, blank)
+    (blank.parent/"VDR Assistant"/"manifest.json").write_text(manifest.model_dump_json(),encoding="utf-8")
     with pytest.raises(UploadPreparationError, match="vector-store ID"):
         prepare_manifest_upload(blank)
 
     mismatch = make_case(tmp_path / "mismatch", ("document.pdf",))
     manifest = load_manifest(mismatch)
     manifest.root_path = str((tmp_path / "other" / "VDR").resolve())
-    save_manifest(manifest, mismatch)
+    (mismatch.parent/"VDR Assistant"/"manifest.json").write_text(manifest.model_dump_json(),encoding="utf-8")
     with pytest.raises(UploadPreparationError, match="does not belong"):
         prepare_manifest_upload(mismatch)
 
@@ -335,8 +337,8 @@ def test_execution_persists_all_checkpoints_before_attachment(
         "file_started",
         "save:not_started",
         "manifest_marked_uploading",
-        "file_uploaded",
         "save:not_started",
+        "file_uploaded",
         "file_id_persisted",
         "save:in_progress",
         "attachment_started",
@@ -379,7 +381,7 @@ def test_definite_pre_remote_failure_continues_later_file(tmp_path: Path) -> Non
     assert calls == ["first.pdf", "second.pdf"]
     assert result.completed_count == 1
     assert result.safely_retryable_count == 1
-    assert result.safe_retry_paths == ("first.pdf",)
+    assert result.safe_retry_keys == (UploadTargetKey("first.pdf"),)
     persisted = load_manifest(vdr_folder)
     first = next(item for item in persisted.files if item.relative_path == "first.pdf")
     assert first.upload_status == "failed"

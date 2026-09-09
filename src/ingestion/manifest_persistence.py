@@ -12,11 +12,13 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from src.ingestion.local_io import atomic_replace
 from typing import NamedTuple
 
 from pydantic import ValidationError
 
 from src.ingestion.manifest import VDRManifest
+from src.ingestion.paths import managed_path, resolve_relative, validate_disjoint_roots
 
 
 class ManifestPersistenceError(Exception):
@@ -71,11 +73,15 @@ def derive_manifest_paths(vdr_folder: str | Path) -> ManifestPaths:
     project_folder = selected_folder.parent
 
     if not project_folder.exists() or not project_folder.is_dir():
-        raise ManifestPathError(
-            f"Project folder is unavailable: {project_folder}"
-        )
+        raise ManifestPathError(f"Project folder is unavailable: {project_folder}")
 
     assistant_folder = project_folder / "VDR Assistant"
+    try:
+        validate_disjoint_roots(selected_folder, assistant_folder)
+        managed_path(selected_folder, assistant_folder, "manifest.json")
+        managed_path(selected_folder, assistant_folder, "manifest.backup.json")
+    except ValueError as error:
+        raise ManifestPathError(str(error)) from error
 
     return ManifestPaths(
         vdr_folder=selected_folder,
@@ -89,10 +95,7 @@ def derive_manifest_paths(vdr_folder: str | Path) -> ManifestPaths:
 def _serialize_manifest(manifest: VDRManifest) -> str:
     """Serialize a manifest without machine-specific per-file paths."""
 
-    data = manifest.model_dump(
-        mode="json",
-        exclude={"files": {"__all__": {"absolute_path"}}},
-    )
+    data = VDRManifest.model_validate(manifest.model_dump()).model_dump(mode="json")
     return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
 
 
@@ -128,8 +131,7 @@ def _write_temporary_file(
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
         raise ManifestPersistenceError(
-            f"Could not write a temporary manifest file in {directory}: "
-            f"{error}"
+            f"Could not write a temporary manifest file in {directory}: " f"{error}"
         ) from error
 
 
@@ -145,6 +147,16 @@ def _ensure_assistant_folder(paths: ManifestPaths) -> None:
         ) from error
 
 
+def _require_write_owner(manifest, paths):
+    if (
+        not manifest.root_path
+        or Path(manifest.root_path).expanduser().resolve() != paths.vdr_folder
+    ):
+        raise ManifestPathError(
+            "The manifest belongs to another source root. Use a distinct snapshot location."
+        )
+
+
 def create_manifest(
     manifest: VDRManifest,
     vdr_folder: str | Path,
@@ -152,6 +164,7 @@ def create_manifest(
     """Create the first current manifest without overwriting one."""
 
     paths = derive_manifest_paths(vdr_folder)
+    _require_write_owner(manifest, paths)
     _ensure_assistant_folder(paths)
 
     if paths.manifest_path.exists():
@@ -167,7 +180,7 @@ def create_manifest(
             ".manifest-create-",
             _serialize_manifest(manifest),
         )
-        os.replace(temporary_path, paths.manifest_path)
+        atomic_replace(temporary_path, paths.manifest_path)
         temporary_path = None
         return paths.manifest_path
     except OSError as error:
@@ -179,6 +192,81 @@ def create_manifest(
             temporary_path.unlink(missing_ok=True)
 
 
+_REMOTE_FIELDS = {
+    "openai_file_id",
+    "upload_status",
+    "indexing_status",
+    "upload_attempts",
+    "last_error",
+}
+
+
+def _content_identity(manifest):
+    data = manifest.model_dump(mode="json")
+    for key in ("updated_at", "snapshot_state"):
+        data.pop(key, None)
+    for record in data["files"]:
+        for key in _REMOTE_FIELDS:
+            record.pop(key, None)
+        for artifact in record["derived_artifacts"]:
+            for key in _REMOTE_FIELDS:
+                artifact.pop(key, None)
+    return data
+
+
+def _guard_save(manifest, paths):
+    _require_write_owner(manifest, paths)
+    VDRManifest.model_validate(manifest.model_dump())
+    if paths.manifest_path.exists():
+        current = _load_manifest_file(paths.manifest_path, "Current")
+        _require_write_owner(current, paths)
+        if current.snapshot_state == "sealed":
+            raise ManifestPersistenceError(
+                "Sealed snapshots reject ingestion mutations."
+            )
+        if current.vector_store_id and _content_identity(current) != _content_identity(
+            manifest
+        ):
+            raise ManifestPersistenceError(
+                "Vector-store association freezes snapshot content and association."
+            )
+        if manifest.snapshot_state == "sealed":
+            from src.ingestion.case_readiness import assess_manifest_readiness
+
+            if not assess_manifest_readiness(manifest, paths.vdr_folder).is_ready:
+                raise ManifestPersistenceError("Only a ready snapshot can be sealed.")
+        # IDs can only progress from absent to known; never clear or substitute.
+        current_owners = [r for f in current.files for r in [f, *f.derived_artifacts]]
+        next_owners = [r for f in manifest.files for r in [f, *f.derived_artifacts]]
+        if current.vector_store_id:
+            for before, after in zip(current_owners, next_owners, strict=True):
+                if (
+                    before.openai_file_id
+                    and before.openai_file_id != after.openai_file_id
+                ):
+                    raise ManifestPersistenceError(
+                        "Known OpenAI IDs cannot be cleared or replaced."
+                    )
+                if (
+                    before.indexing_status == "completed"
+                    and before.model_dump() != after.model_dump()
+                ):
+                    raise ManifestPersistenceError(
+                        "Completed upload targets are immutable."
+                    )
+                if (
+                    before.upload_status in {"uploading", "uploaded", "failed"}
+                    and after.upload_status == "not_uploaded"
+                ):
+                    raise ManifestPersistenceError(
+                        "Upload uncertainty cannot be reset into an initial upload."
+                    )
+                if after.upload_attempts < before.upload_attempts:
+                    raise ManifestPersistenceError(
+                        "Upload attempt counters cannot decrease."
+                    )
+
+
 def save_manifest(
     manifest: VDRManifest,
     vdr_folder: str | Path,
@@ -186,6 +274,7 @@ def save_manifest(
     """Save the newest state and retain exactly one previous backup."""
 
     paths = derive_manifest_paths(vdr_folder)
+    _guard_save(manifest, paths)
     _ensure_assistant_folder(paths)
 
     previous_updated_at = manifest.updated_at
@@ -216,10 +305,10 @@ def save_manifest(
                 ".manifest-backup-",
                 current_content,
             )
-            os.replace(backup_temporary, paths.backup_path)
+            atomic_replace(backup_temporary, paths.backup_path)
             backup_temporary = None
 
-        os.replace(new_manifest_temporary, paths.manifest_path)
+        atomic_replace(new_manifest_temporary, paths.manifest_path)
         new_manifest_temporary = None
         return paths.manifest_path
     except OSError as error:
@@ -260,10 +349,10 @@ def _load_manifest_file(path: Path, label: str) -> VDRManifest:
 
     if isinstance(data, dict):
         schema_version = data.get("schema_version")
-        if schema_version is not None and schema_version != 1:
+        if type(schema_version) is not int or schema_version != 2:
             raise UnsupportedSchemaVersionError(
                 f"Unsupported manifest schema version "
-                f"{schema_version!r}: {path}"
+                f"{schema_version!r}: {path}. Recreate the case under Manifest v2."
             )
 
     try:
@@ -300,17 +389,10 @@ def relink_manifest(
     relinked.root_path = str(root)
 
     for file_record in relinked.files:
-        relative_path = Path(file_record.relative_path)
-        candidate = (root / relative_path).resolve()
-
         try:
-            candidate.relative_to(root)
+            resolve_relative(root, file_record.relative_path)
         except ValueError as error:
             raise ManifestPathError(
-                f"File relative path escapes the selected VDR root: "
-                f"{file_record.relative_path}"
+                f"File path escapes selected VDR: {file_record.relative_path}"
             ) from error
-
-        file_record.absolute_path = str(candidate)
-
     return relinked

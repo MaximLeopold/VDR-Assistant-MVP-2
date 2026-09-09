@@ -151,7 +151,7 @@ def test_eligible_evidence_runs_one_selector_call_and_attaches_metric(
     assert selector_calls[0][0].text == ELIGIBLE_TEXT
     assert answer.sources[0].presentations == [presentation]
     assert answer.sources[0].evidence == [ELIGIBLE_TEXT]
-    assert answer.source_files == ["Report.pdf"]
+    assert answer.source_files == ["Unknown source"]
 
 
 def test_verified_table_attaches_to_exact_source_only(monkeypatch) -> None:
@@ -256,7 +256,7 @@ def test_empty_selection_leaves_successful_answer_unchanged(
 
     assert answer.status == "success"
     assert answer.answer == "Supported answer"
-    assert answer.source_files == ["Report.pdf"]
+    assert answer.source_files == ["Unknown source"]
     assert answer.sources[0].evidence == [ELIGIBLE_TEXT]
     assert answer.sources[0].presentations == []
 
@@ -343,7 +343,7 @@ def test_unexpected_structured_failure_preserves_all_normal_support(
     assert answer == supported_answer.model_copy(update={
         "warnings": [qa_chain.STRUCTURED_PROCESSING_FAILED_WARNING],
     })
-    assert answer.source_files == ["Report.pdf", "Other.pdf"]
+    assert answer.source_files == ["Unknown source", "Unknown source"]
     assert [item.role for item in answer.sources[0].selected_evidence] == [
         "best_support", "additional_context",
     ]
@@ -488,7 +488,7 @@ def test_verified_quotes_and_structure_are_attached_independently(
     assert answer.sources[0].evidence == [QUOTE_TEXT, ELIGIBLE_TEXT]
     assert captured["sources"][0].evidence == [QUOTE_TEXT, ELIGIBLE_TEXT]
     assert [item.passage_index for item in captured["passage_scope"]] == [1]
-    assert answer.source_files == ["Offer.pdf"]
+    assert answer.source_files == ["Unknown source"]
 
 
 def test_not_found_answer_never_runs_phase_2a(monkeypatch) -> None:

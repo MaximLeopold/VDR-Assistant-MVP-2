@@ -53,7 +53,7 @@ def test_classify_file_uses_renamed_fields(
 def test_file_record_has_ingestion_defaults() -> None:
     record = VDRFileRecord(**make_file_record())
 
-    assert record.checksum_sha256 is None
+    assert "checksum_sha256" not in record.model_dump()
     assert record.openai_file_id is None
     assert record.upload_status == "not_uploaded"
     assert record.indexing_status == "not_started"
@@ -83,10 +83,10 @@ def test_file_record_rejects_invalid_status(
 def test_manifest_rejects_unsupported_schema_version(tmp_path: Path) -> None:
     manifest = build_manifest(str(tmp_path))
 
-    assert manifest.schema_version == 1
+    assert manifest.schema_version == 2
 
     values = manifest.model_dump()
-    values["schema_version"] = 2
+    values["schema_version"] = 1
 
     with pytest.raises(ValidationError):
         VDRManifest.model_validate(values)

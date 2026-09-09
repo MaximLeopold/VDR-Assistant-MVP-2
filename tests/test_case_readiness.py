@@ -41,6 +41,7 @@ def create_case(
     vdr_folder.mkdir(parents=True)
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     manifest = VDRManifest(
+        schema_version=2,
         case_name=case_name,
         root_path=root_path or str(vdr_folder.resolve()),
         vector_store_id=vector_store_id,
@@ -53,7 +54,14 @@ def create_case(
         error_files=999,
         files=records,
     )
-    create_manifest(manifest, vdr_folder)
+    if root_path:
+        original=manifest.root_path
+        manifest.root_path=str(vdr_folder.resolve())
+        path=create_manifest(manifest,vdr_folder)
+        manifest.root_path=original
+        path.write_text(manifest.model_dump_json(),encoding="utf-8")
+    else:
+        create_manifest(manifest, vdr_folder)
     return vdr_folder
 
 
@@ -179,7 +187,7 @@ def test_zero_supported_and_classification_error_block(tmp_path: Path) -> None:
     assert not readiness.is_ready
     assert readiness.supported_count == 0
     assert readiness.classification_error_count == 1
-    assert any("supported" in reason for reason in readiness.blocking_reasons)
+    assert any("searchable target" in reason for reason in readiness.blocking_reasons)
     assert any("classification" in reason for reason in readiness.blocking_reasons)
 
 

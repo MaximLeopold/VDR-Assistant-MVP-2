@@ -107,6 +107,7 @@ def manifest() -> VDRManifest:
         indexing_status="completed",
     )
     return VDRManifest(
+        schema_version=2,
         case_name="Test Case",
         vector_store_id="vs-test",
         created_at=now,

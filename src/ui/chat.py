@@ -562,6 +562,10 @@ def render_evidence_tab(source: SourceReference) -> None:
 def render_raw_retrieval(source: SourceReference) -> None:
     """Render exact stored File Search strings for auditability."""
 
+    if source.excel_provenance is not None:
+        st.caption(f'Source: {source.display_name}')
+        st.caption('Source type: Excel-derived search representation')
+
     if source.evidence_selection_status == "completed":
         associations_by_passage: dict[int, list[str]] = {}
         additional_number = 0
@@ -634,11 +638,17 @@ def _render_answer_content(
         st.markdown(answer.answer)
     render_answer_trust_caption(answer)
 
-    if answer.verified_quotes:
-        with st.expander("Verified quotations"):
-            for quote in answer.verified_quotes:
-                st.text(f"“{quote.text}”", width="stretch")
-                st.caption(f"Source: {quote.source_display_name}")
+    excel_ids = {source.file_id for source in answer.sources if source.excel_provenance is not None and source.file_id}
+    quote_groups = [
+        ('Verified quotations', [q for q in answer.verified_quotes if q.file_id not in excel_ids]),
+        ('Excel-derived excerpts', [q for q in answer.verified_quotes if q.file_id in excel_ids]),
+    ]
+    for title, quotes in quote_groups:
+        if quotes:
+            with st.expander(title):
+                for quote in quotes:
+                    st.text(f'\u201c{quote.text}\u201d', width='stretch')
+                    st.caption(f'Source: {quote.source_display_name}')
 
     evidence_sources = [source for source in answer.sources if _has_useful_evidence(source)]
     if evidence_sources:

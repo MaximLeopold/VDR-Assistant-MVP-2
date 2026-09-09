@@ -70,7 +70,7 @@ def test_eligibility_selects_only_supported_records_without_id() -> None:
         )
     manifest = SimpleNamespace(files=records)
 
-    assert script.select_eligible_records(manifest) == [records[0]]
+    assert [record for record in manifest.files if script.classify_manifest_record(record).eligible] == [records[0]]
 
 
 def test_no_eligible_records_skips_confirmation_save_and_client(
@@ -152,8 +152,9 @@ def test_preflight_rejects_invalid_paths(
         size_bytes=999,
     )
 
-    with pytest.raises(ValueError, match=message):
-        script.preflight_local_files(root, [record])
+    path, reason = script.preflight_manifest_record(root,record)
+    assert path is None
+    assert message in reason.lower()
 
 
 def test_preflight_ignores_persisted_absolute_path(tmp_path: Path) -> None:
@@ -168,9 +169,7 @@ def test_preflight_ignores_persisted_absolute_path(tmp_path: Path) -> None:
         size_bytes=4,
     )
 
-    assert script.preflight_local_files(root, [record]) == [
-        (record, local_path.resolve())
-    ]
+    assert script.preflight_manifest_record(root, record) == (local_path.resolve(), None)
 
 
 def configure_success(monkeypatch, events: list[str]):
@@ -354,7 +353,7 @@ def test_id_save_failure_stops_before_attachment_and_reports_id(
     assert script.main() == 1
     captured = capsys.readouterr()
     assert "file_recover" in captured.err
-    assert "reconcile it manually" in captured.err
+    assert "inspect the candidate" in captured.err
     attach.assert_not_called()
     upload.assert_called_once()
     client.files.delete.assert_not_called()

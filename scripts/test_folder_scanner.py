@@ -37,6 +37,7 @@ def main() -> None:
     print(f"Root folder        : {manifest.root_path}")
     print(f"Total files        : {manifest.total_files}")
     print(f"Supported files    : {manifest.supported_files}")
+    print(f"Excel workbooks    : {manifest.preprocess_files}")
     print(f"Unsupported files  : {manifest.unsupported_files}")
     print(f"Ignored files      : {manifest.ignored_files}")
 

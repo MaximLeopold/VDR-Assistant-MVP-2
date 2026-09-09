@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+from src.ingestion.local_io import atomic_replace
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -17,6 +18,7 @@ from src.ingestion.manifest_persistence import (
     ManifestPersistenceError,
     derive_manifest_paths,
     load_manifest,
+    save_manifest,
 )
 from src.ingestion.vector_store_manager import (
     InvalidVectorStoreIdError,
@@ -130,9 +132,7 @@ def _read_registry(path: Path) -> CaseRegistryDocument:
     try:
         raw_text = path.read_text(encoding="utf-8")
     except OSError as error:
-        raise CaseRegistryError(
-            "The local case registry could not be read."
-        ) from error
+        raise CaseRegistryError("The local case registry could not be read.") from error
 
     try:
         data = json.loads(raw_text)
@@ -150,9 +150,7 @@ def _read_registry(path: Path) -> CaseRegistryDocument:
         ) from error
 
     case_ids = [entry.case_id.casefold() for entry in registry.cases]
-    duplicate_ids = {
-        case_id for case_id in case_ids if case_ids.count(case_id) > 1
-    }
+    duplicate_ids = {case_id for case_id in case_ids if case_ids.count(case_id) > 1}
     if duplicate_ids:
         raise CaseRegistryError(
             "The local case registry contains duplicate case_id values."
@@ -216,7 +214,7 @@ def _atomic_replace_registry(path: Path, registry: CaseRegistryDocument) -> None
             path,
             _serialize_registry(registry),
         )
-        os.replace(temporary_path, path)
+        atomic_replace(temporary_path, path)
         temporary_path = None
     except OSError as error:
         raise CaseRegistryError(
@@ -229,14 +227,12 @@ def _atomic_replace_registry(path: Path, registry: CaseRegistryDocument) -> None
     try:
         reloaded = _read_registry(path)
         if reloaded.model_dump(mode="json") != registry.model_dump(mode="json"):
-            raise CaseRegistryError(
-                "The updated case registry could not be verified."
-            )
+            raise CaseRegistryError("The updated case registry could not be verified.")
     except Exception as verification_error:
         recovery_path: Path | None = None
         try:
             recovery_path = _write_registry_temporary(path, original_content)
-            os.replace(recovery_path, path)
+            atomic_replace(recovery_path, path)
             recovery_path = None
         except Exception as recovery_error:
             raise CaseRegistryError(
@@ -280,6 +276,14 @@ def _prepare_case(
             case_id=entry.case_id,
             vdr_folder=vdr_folder,
             error="The case manifest could not be accessed.",
+        )
+
+    if manifest.snapshot_state != "sealed":
+        return PreparedCase(
+            case_id=entry.case_id,
+            vdr_folder=vdr_folder,
+            manifest=manifest,
+            error="The case snapshot is not sealed.",
         )
 
     case_name = manifest.case_name.strip()
@@ -340,12 +344,30 @@ def register_prepared_case(
 
     readiness = assess_case_readiness(canonical_folder)
     if not readiness.is_ready:
-        detail = readiness.blocking_reasons[0] if readiness.blocking_reasons else (
-            "The case is not ready for registration."
+        detail = (
+            readiness.blocking_reasons[0]
+            if readiness.blocking_reasons
+            else ("The case is not ready for registration.")
         )
         raise CaseRegistryError(f"The case is not ready for registration. {detail}")
 
+    manifest = load_manifest(canonical_folder)
+    if manifest.snapshot_state != "sealed":
+        manifest.snapshot_state = "sealed"
+        try:
+            save_manifest(manifest, canonical_folder)
+        except ManifestPersistenceError as error:
+            raise CaseRegistryError(
+                "The ready snapshot could not be sealed; retry registration."
+            ) from error
+    if load_manifest(canonical_folder).snapshot_state != "sealed":
+        raise CaseRegistryError("Snapshot seal verification failed.")
+
     path = _resolve_registry_path(registry_path, base_dir=base_dir)
+    if path.is_relative_to(canonical_folder) or path.parent.is_relative_to(
+        canonical_folder
+    ):
+        raise CaseRegistryError("The registry must not be written inside the raw VDR.")
     registry = _read_registry(path)
     candidate_key = _path_key(canonical_folder)
 
@@ -369,9 +391,7 @@ def register_prepared_case(
         vdr_folder=canonical_folder.as_posix(),
     )
     try:
-        updated = CaseRegistryDocument(
-            cases=[*registry.cases, new_entry]
-        )
+        updated = CaseRegistryDocument(cases=[*registry.cases, new_entry])
     except ValidationError as error:
         raise CaseRegistryError(
             "The updated local case registry failed validation."

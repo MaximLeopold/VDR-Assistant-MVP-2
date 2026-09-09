@@ -7,6 +7,8 @@ import pytest
 
 from src.ingestion.case_vector_store import (
     CaseVectorStoreConflictError,
+    CaseVectorStoreError,
+    associate_empty_case_vector_store,
     NoCaseVectorStoreError,
     VectorStoreCreatedButNotPersistedError,
     adopt_case_vector_store,
@@ -35,6 +37,7 @@ def make_case(tmp_path: Path, vector_store_id: str | None = None):
         classification_reason="Supported file type",
     )
     manifest = VDRManifest(
+        schema_version=2,
         case_name="Project Falcon",
         root_path=str(vdr),
         vector_store_id=vector_store_id,
@@ -87,7 +90,7 @@ def test_same_candidate_is_idempotently_reused(tmp_path: Path) -> None:
     client = make_client()
     client.vector_stores.retrieve.return_value = remote("vs_same")
 
-    result = adopt_case_vector_store(client, vdr, " vs_same ")
+    result = associate_empty_case_vector_store(client, vdr, " vs_same ", registered_cases=[])
 
     assert result.action == "reused"
     client.vector_stores.create.assert_not_called()
@@ -115,12 +118,8 @@ def test_valid_candidate_is_retrieved_then_adopted(tmp_path: Path) -> None:
     client = make_client()
     client.vector_stores.retrieve.return_value = remote("vs_adopted")
 
-    result = ensure_case_vector_store(
-        client,
-        vdr,
-        adoption_candidate="vs_adopted",
-        allow_create=True,
-    )
+    client.vector_stores.files.list.return_value = []
+    result = associate_empty_case_vector_store(client,vdr,'vs_adopted',registered_cases=[])
 
     assert result.action == "adopted"
     assert load_manifest(vdr).vector_store_id == "vs_adopted"
@@ -135,7 +134,7 @@ def test_invalid_candidate_is_not_persisted(tmp_path: Path) -> None:
         "uncertain"
     )
 
-    with pytest.raises(VectorStoreConnectionError):
+    with pytest.raises(CaseVectorStoreError,match="strict empty-store"):
         ensure_case_vector_store(client, vdr, adoption_candidate="vs_candidate")
 
     assert load_manifest(vdr).vector_store_id is None

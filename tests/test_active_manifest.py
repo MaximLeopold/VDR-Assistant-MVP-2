@@ -13,6 +13,8 @@ from src.ingestion.manifest_persistence import (
 def manifest(vector_store_id: str | None = "vs-test") -> VDRManifest:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     return VDRManifest(
+        schema_version=2,
+        snapshot_state="sealed",
         case_name="Test Case",
         vector_store_id=vector_store_id,
         created_at=now,
@@ -30,7 +32,9 @@ def create_case(tmp_path: Path, vector_store_id: str = "vs-test") -> Path:
     project = tmp_path / "Project"
     vdr_folder = project / "VDR"
     vdr_folder.mkdir(parents=True)
-    create_manifest(manifest(vector_store_id), vdr_folder)
+    candidate=manifest(vector_store_id)
+    candidate.root_path=str(vdr_folder.resolve())
+    create_manifest(candidate, vdr_folder)
     return vdr_folder
 
 

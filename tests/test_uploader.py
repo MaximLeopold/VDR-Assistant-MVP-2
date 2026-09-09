@@ -37,14 +37,14 @@ def test_upload_opens_binary_and_uses_assistants_purpose(
 def test_attach_and_poll_uses_exact_file_and_vector_store_ids() -> None:
     client = Mock()
     result = SimpleNamespace(status="completed")
-    client.vector_stores.files.create_and_poll.return_value = result
+    client.vector_stores.files.create.return_value = result
 
     assert (
         attach_file_and_poll(client, "vs_manifest", "file_uploaded")
         is result
     )
-    client.vector_stores.files.create_and_poll.assert_called_once_with(
-        "file_uploaded",
+    client.vector_stores.files.create.assert_called_once_with(
+        file_id="file_uploaded",
         vector_store_id="vs_manifest",
     )
     client.vector_stores.files.delete.assert_not_called()

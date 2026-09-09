@@ -21,6 +21,8 @@ def make_registered_case(root: Path) -> Path:
     vdr_folder.mkdir(parents=True)
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     manifest = VDRManifest(
+        schema_version=2,
+        snapshot_state="sealed",
         case_name="Existing Case",
         root_path=str(vdr_folder.resolve()),
         vector_store_id="vs_existing",
@@ -46,7 +48,7 @@ class FakeFiles:
         self.calls.append(vector_store_id)
         return []
 
-    def create_and_poll(self, file_id, *, vector_store_id):
+    def create(self, file_id, *, vector_store_id):
         self.attach_calls.append((vector_store_id, file_id))
         return SimpleNamespace(status="completed")
 
@@ -125,7 +127,7 @@ def test_phase1_streamlit_flow_uses_fake_client_and_does_not_register(
     new_vdr = tmp_path / "new" / "Project B" / "VDR"
     new_vdr.mkdir(parents=True)
     (new_vdr / "A.pdf").write_bytes(b"supported")
-    (new_vdr / "B.xlsx").write_bytes(b"unsupported")
+    (new_vdr / "B.xls").write_bytes(b"unsupported")
 
     fake_client = FakeClient()
     monkeypatch.setattr(settings, "CASE_REGISTRY_PATH", str(registry_path))
@@ -328,3 +330,48 @@ def test_restart_resume_reuses_associated_manifest_and_preview_is_read_only(
     assert any("Upload preview" in item.value for item in app.subheader)
     assert factory.call_count == 0
     assert load_manifest(new_vdr).model_dump() == before
+
+
+def test_excel_only_streamlit_preparation_exclusion_and_registration(tmp_path,monkeypatch):
+    from openpyxl import Workbook
+    existing=make_registered_case(tmp_path)
+    registry=tmp_path/'cases.json'
+    registry.write_text(json.dumps({'cases':[{'case_id':'existing','vdr_folder':str(existing)}]}),encoding='utf-8')
+    root=tmp_path/'excel-case'/'VDR';root.mkdir(parents=True)
+    (root/'bad.xlsx').write_bytes(b'corrupt workbook')
+    book=Workbook();book.active.title='Revenue';book.active['A1']='Revenue 2025 100';book.create_sheet('Headcount')['A1']='Headcount 20';book.save(root/'model.xlsx');book.close()
+    client=FakeClient()
+    monkeypatch.setattr(settings,'CASE_REGISTRY_PATH',str(registry))
+    monkeypatch.setattr(settings,'OPENAI_API_KEY','offline-test')
+    monkeypatch.setattr(new_case_ui,'get_openai_client',lambda:client)
+    app=AppTest.from_file('app/main.py').run()
+    button_with_label(app,'Prepare new case').click().run()
+    input_with_label(app,'Local VDR folder').input(str(root))
+    input_with_label(app,'Technical case ID').input('excel-case')
+    app.run();button_with_label(app,'Validate and scan').click().run()
+    button_with_label(app,'Create manifest').click().run()
+    assert not app.exception
+    assert not client.vector_stores.retrieve_calls
+    assert not any(widget.label=='OpenAI vector-store ID' for widget in app.text_input)
+    app.button(key='excel_prepare_0').click().run()
+    assert load_manifest(root).files[0].excel_preprocessing.status=='failed'
+    app.run()
+    app.text_input(key='excel_exclusion_reason_0').input('Deliberately corrupt fixture').run()
+    app.button(key='excel_exclude_0').click().run()
+    app.button(key='excel_prepare_1').click().run()
+    assert not app.exception
+    manifest=load_manifest(root)
+    assert manifest.files[0].excel_preprocessing.status=='excluded'
+    assert len(manifest.files[1].derived_artifacts)==2
+    button_with_label(app,'Continue to vector-store association').click().run()
+    input_with_label(app,'OpenAI vector-store ID').input('vs_excel')
+    app.run();button_with_label(app,'Validate and associate').click().run()
+    button_with_label(app,'Continue case preparation').click().run()
+    button_with_label(app,'Upload and index all eligible files').click().run()
+    assert not app.exception
+    assert [name for name,_ in client.files.create_calls]==['sheet_001.md','sheet_002.md']
+    button_with_label(app,'Continue to registration').click().run()
+    button_with_label(app,'Register prepared case').click().run()
+    assert not app.exception
+    assert load_manifest(root).snapshot_state=='sealed'
+    assert any(c['case_id']=='excel-case' for c in json.loads(registry.read_text())['cases'])

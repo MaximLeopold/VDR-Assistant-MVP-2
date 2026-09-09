@@ -1,38 +1,4 @@
-"""Filter supported and unsupported files.
-
-Responsibilities:
-
-- Accept supported document types.
-- Ignore unsupported file types.
-- Ignore temporary system files.
-- Report skipped files.
-
-Initial supported file types:
-
-- PDF
-- PPTX
-- DOCX
-
-Initial ignored file types:
-
-- XLSX
-- XLS
-- XLSM
-- CSV
-
-Excel support will be added in a later version.
-"""
-
-"""File filtering for VDR ingestion.
-
-This module classifies scanned files before upload - it functions after the folder scanner and before the upload step.
-It basically receives the file records from the folder_scanner and classifies them as supported, unsupported or ignored.
-
-It does not upload files.
-It only determines whether files should be included, ignored,
-or marked as unsupported.
-"""
-
+"""Classify direct documents, preprocessable xlsx workbooks and exclusions."""
 
 SUPPORTED_EXTENSIONS = {
     ".pdf",
@@ -82,6 +48,11 @@ def classify_file(file_record: dict) -> dict:
     if size_bytes == 0:
         classified["classification_status"] = "ignored"
         classified["classification_reason"] = "Empty file"
+        return classified
+
+    if extension == ".xlsx":
+        classified["classification_status"] = "preprocess"
+        classified["classification_reason"] = "Excel worksheet preprocessing required"
         return classified
 
     if extension not in SUPPORTED_EXTENSIONS:

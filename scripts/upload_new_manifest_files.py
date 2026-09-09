@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -28,53 +27,21 @@ def normalize_vdr_folder_input(raw_path: str) -> str:
     """Normalize a normally pasted local folder path."""
 
     normalized = raw_path.strip()
-    if (
-        len(normalized) >= 2
-        and normalized.startswith('"')
-        and normalized.endswith('"')
-    ):
+    if len(normalized) >= 2 and normalized.startswith('"') and normalized.endswith('"'):
         normalized = normalized[1:-1].strip()
     return normalized
-
-
-def select_eligible_records(manifest) -> list:
-    """Compatibility helper using the shared conservative classifier."""
-
-    return [
-        record
-        for record in manifest.files
-        if classify_manifest_record(record).eligible
-    ]
-
-
-def preflight_local_files(
-    vdr_folder: str | Path,
-    records: list,
-) -> list[tuple[object, Path]]:
-    """Compatibility helper using the shared path-safe read probe."""
-
-    validated: list[tuple[object, Path]] = []
-    for record in records:
-        local_path, reason = preflight_manifest_record(vdr_folder, record)
-        if reason is not None or local_path is None:
-            raise ValueError(f"{record.relative_path}: {reason}")
-        validated.append((record, local_path))
-    return validated
 
 
 def _terminal_progress(event: UploadProgressEvent) -> None:
     if event.kind == "file_started":
         print(
             f"[{event.current_index}/{event.total_candidates}] "
-            f"Processing {event.relative_path}"
+            f"Processing {event.display_label}"
         )
     elif event.kind == "indexing_completed":
-        print(f"Completed: {event.relative_path}")
+        print(f"Completed: {event.display_label}")
     elif event.kind == "file_failed":
-        print(
-            f"Needs attention: {event.relative_path}: "
-            f"{event.sanitized_message}"
-        )
+        print(f"Needs attention: {event.display_label}: " f"{event.sanitized_message}")
     elif event.kind == "batch_stopped":
         print(
             event.sanitized_message or "Upload workflow stopped.",
@@ -124,17 +91,15 @@ def main() -> int:
     print(f"Case name: {plan.case_name}")
     print(f"Files requiring upload: {len(plan.candidates)}")
     print("\nFILES TO UPLOAD")
-    candidate_paths = {candidate.relative_path for candidate in plan.candidates}
+    candidate_keys = {candidate.key for candidate in plan.candidates}
     for row in plan.rows:
-        if row.relative_path in candidate_paths:
+        if row.key in candidate_keys:
             print(
-                f"- {row.relative_path} | {row.size_bytes} bytes | "
+                f"- {row.display_label} | {row.size_bytes} bytes | "
                 f"{row.upload_status} | {row.indexing_status}"
             )
 
-    confirmation = input(
-        "\nType UPLOAD to upload and index these files: "
-    ).strip()
+    confirmation = input("\nType UPLOAD to upload and index these files: ").strip()
     if confirmation != "UPLOAD":
         print("Upload aborted. No manifest or OpenAI resource was changed.")
         return 2
@@ -147,10 +112,17 @@ def main() -> int:
         attach_file=attach_file_and_poll,
         manifest_saver=save_manifest,
     )
+    if result.recovery_details:
+        import json
+
+        print(
+            json.dumps(result.recovery_details, ensure_ascii=False, indent=2),
+            file=sys.stderr,
+        )
     if result.recovery_file_id is not None:
         print(
             "Preserve OpenAI File ID "
-            f"{result.recovery_file_id} and reconcile it manually before "
+            f"{result.recovery_file_id} and inspect the candidate before "
             "rerunning uploads.",
             file=sys.stderr,
         )

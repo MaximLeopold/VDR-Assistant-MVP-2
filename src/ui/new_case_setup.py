@@ -22,6 +22,7 @@ from src.ingestion.case_vector_store import (
     mask_vector_store_id,
 )
 from src.ingestion.case_readiness import assess_case_readiness
+from src.ingestion.excel_preprocessing import preprocess_workbook, exclude_workbook
 from src.ingestion.manifest_persistence import (
     ManifestPersistenceError,
     derive_manifest_paths,
@@ -46,11 +47,11 @@ from src.ingestion.upload_workflow import (
     UploadDisposition,
     UploadPreparationError,
     UploadProgressEvent,
+    SafeRetryAuthorization,
     prepare_manifest_upload,
     run_manifest_upload,
 )
 from src.retrieval.openai_file_search import get_openai_client
-
 
 SETUP_ACTIVE_KEY = "setup_active"
 SETUP_STEP_KEY = "setup_step"
@@ -65,7 +66,7 @@ FOLDER_INPUT_KEY = "setup_folder_input"
 CASE_ID_INPUT_KEY = "setup_case_id_input"
 VECTOR_STORE_INPUT_KEY = "setup_vector_store_input"
 SETUP_UPLOAD_RESULT_KEY = "setup_upload_result"
-SETUP_SAFE_RETRY_KEY = "setup_safe_retry_paths"
+SETUP_SAFE_RETRY_KEY = "setup_safe_retry_authorization"
 SETUP_REGISTRATION_RESULT_KEY = "setup_registration_result"
 
 SETUP_KEYS = (
@@ -124,15 +125,25 @@ def _render_pending_message(state: MutableMapping) -> None:
         return
     kind = result.get("kind")
     message = result.get("message")
-    if kind in {"success", "info", "warning", "error"} and isinstance(
-        message, str
-    ):
+    if kind in {"success", "info", "warning", "error"} and isinstance(message, str):
         getattr(st, kind)(message)
 
 
 def _cancel_setup(state: MutableMapping) -> None:
     clear_new_case_setup_session(state)
     st.rerun()
+
+
+def _set_setup_candidate(state: MutableMapping, folder: Path, case_id: str) -> None:
+    canonical_folder = str(folder.expanduser().resolve())
+    if (
+        state.get(SETUP_FOLDER_KEY) != canonical_folder
+        or state.get(SETUP_CASE_ID_KEY) != case_id
+    ):
+        state.pop(SETUP_SAFE_RETRY_KEY, None)
+        state.pop(SETUP_UPLOAD_RESULT_KEY, None)
+    state[SETUP_FOLDER_KEY] = canonical_folder
+    state[SETUP_CASE_ID_KEY] = case_id
 
 
 def _render_details(
@@ -149,7 +160,7 @@ def _render_details(
     folder_input = st.text_input(
         "Local VDR folder",
         key=FOLDER_INPUT_KEY,
-        placeholder=r'C:\Projects\Case B\VDR',
+        placeholder=r"C:\Projects\Case B\VDR",
     )
     case_id_input = st.text_input(
         "Technical case ID",
@@ -186,8 +197,7 @@ def _render_details(
         _set_message(state, "error", str(error))
         st.rerun()
 
-    state[SETUP_FOLDER_KEY] = str(preview.vdr_folder)
-    state[SETUP_CASE_ID_KEY] = preview.case_id
+    _set_setup_candidate(state, preview.vdr_folder, preview.case_id)
     state[SETUP_PREVIEW_KEY] = preview
     state[SETUP_FINGERPRINT_KEY] = preview.fingerprint
     state[SETUP_ACTION_KEY] = False
@@ -213,6 +223,7 @@ def _render_preview_summary(preview: NewCasePreview) -> None:
     st.write("**Proposed manifest location:**")
     st.code(str(preview.manifest_path), language=None)
 
+    st.caption(f"Excel workbooks to prepare: {preview.preprocess_files}")
     metrics = st.columns(5)
     metrics[0].metric("Total", preview.total_files)
     metrics[1].metric("Supported", preview.supported_files)
@@ -254,8 +265,7 @@ def _render_preview(state: MutableMapping) -> None:
             type="primary",
             key="create_new_case_manifest",
             disabled=(
-                not preview.can_create_manifest
-                or state.get(SETUP_ACTION_KEY, False)
+                not preview.can_create_manifest or state.get(SETUP_ACTION_KEY, False)
             ),
         )
     with scan_column:
@@ -303,6 +313,95 @@ def _render_preview(state: MutableMapping) -> None:
     st.rerun()
 
 
+def _render_excel_preparation(manifest, vdr_folder):
+    workbooks = [f for f in manifest.files if f.classification_status == "preprocess"]
+    if not workbooks:
+        return True
+    st.subheader("Prepare Excel knowledge")
+    st.caption(
+        "Visible worksheet content becomes searchable. Formulas use stored results and are not recalculated."
+    )
+    complete = True
+    for index, record in enumerate(workbooks):
+        prep = record.excel_preprocessing
+        status = prep.status if prep else "pending"
+        if status not in {"completed", "excluded"}:
+            complete = False
+        with st.expander(f"{record.relative_path} - {status}"):
+            if status == "processing":
+                st.warning(
+                    "Preprocessing was interrupted. Retry creates a fresh attempt."
+                )
+            if prep and prep.last_error:
+                st.error(prep.last_error)
+            if prep and prep.exclusion_reason:
+                st.info(prep.exclusion_reason)
+            if prep and prep.worksheets:
+                st.dataframe(
+                    [
+                        {
+                            "Worksheet": w.worksheet_name,
+                            "Tab": w.worksheet_index,
+                            "Outcome": w.outcome,
+                            "Reason": w.reason,
+                        }
+                        for w in prep.worksheets
+                    ],
+                    hide_index=True,
+                )
+            if st.button(
+                "Prepare workbook" if status == "pending" else "Retry preprocessing",
+                key=f"excel_prepare_{index}",
+            ):
+                try:
+                    preprocess_workbook(vdr_folder, record.relative_path)
+                except Exception as error:
+                    st.error(str(error))
+                else:
+                    st.rerun()
+            reason = st.text_input(
+                "Workbook exclusion reason", key=f"excel_exclusion_reason_{index}"
+            )
+            if st.button(
+                "Exclude workbook",
+                key=f"excel_exclude_{index}",
+                disabled=not reason.strip(),
+            ):
+                try:
+                    exclude_workbook(vdr_folder, record.relative_path, reason)
+                except Exception as error:
+                    st.error(str(error))
+                else:
+                    st.rerun()
+    if not complete:
+        st.info(
+            "Complete or explicitly exclude every workbook before associating an empty vector store."
+        )
+    return complete
+
+
+def _render_excel_stage(state):
+    root = state.get(SETUP_FOLDER_KEY)
+    try:
+        manifest = load_manifest(root)
+        if manifest.vector_store_id or manifest.snapshot_state == "sealed":
+            state[SETUP_STEP_KEY] = "complete"
+            st.rerun()
+        complete = _render_excel_preparation(manifest, root)
+    except (ManifestPersistenceError, OSError) as error:
+        st.error(str(error))
+        return
+    if complete and st.button(
+        "Continue to vector-store association",
+        key="excel_coverage_reviewed",
+        type="primary",
+    ):
+        state[SETUP_STEP_KEY] = "association"
+        st.rerun()
+    if st.button("Cancel", key="cancel_excel_preparation"):
+        _cancel_setup(state)
+
+
 def _render_association(
     state: MutableMapping,
     registered_cases: Sequence[PreparedCase],
@@ -320,9 +419,7 @@ def _render_association(
     except InvalidVectorStoreIdError:
         persisted_id = None
     except (ManifestPersistenceError, OSError):
-        st.error(
-            "The existing manifest is invalid or unreadable. It was not changed."
-        )
+        st.error("The existing manifest is invalid or unreadable. It was not changed.")
         if st.button("Cancel", key="cancel_invalid_setup_manifest"):
             _cancel_setup(state)
         return
@@ -330,7 +427,20 @@ def _render_association(
     if persisted_id is not None:
         state[SETUP_STEP_KEY] = "complete"
         state[SETUP_COMPLETED_KEY] = True
-        state.pop(VECTOR_STORE_INPUT_KEY, None)
+        st.rerun()
+
+    workbooks = [f for f in manifest.files if f.classification_status == "preprocess"]
+    if any(
+        f.excel_preprocessing is None
+        or f.excel_preprocessing.status not in {"completed", "excluded"}
+        for f in workbooks
+    ):
+        state[SETUP_STEP_KEY] = "excel_preparation"
+        st.rerun()
+    if workbooks and st.button(
+        "Review Excel coverage", key="review_excel_before_association"
+    ):
+        state[SETUP_STEP_KEY] = "excel_preparation"
         st.rerun()
 
     st.subheader("Step 3 — Associate an empty vector store")
@@ -383,11 +493,8 @@ def _render_association(
         message = str(error)
     except CaseVectorStoreConflictError:
         message = "This case is already associated with another vector store."
-    except CaseVectorStorePersistenceError:
-        message = (
-            "The vector-store association could not be saved. The same ID "
-            "can be retried."
-        )
+    except CaseVectorStorePersistenceError as error:
+        message = f"Association persistence failed. Preserve exact vector-store ID {error.vector_store_id}. Retry this same ID; do not create another store."
     except VectorStoreError:
         message = (
             "The vector store could not be accessed. Verify the ID, the "
@@ -401,7 +508,6 @@ def _render_association(
         state[SETUP_ACTION_KEY] = False
         state[SETUP_STEP_KEY] = "complete"
         state[SETUP_COMPLETED_KEY] = True
-        state.pop(VECTOR_STORE_INPUT_KEY, None)
         _set_message(state, "success", "The empty vector store was associated.")
         st.rerun()
 
@@ -420,20 +526,21 @@ def _render_complete(state: MutableMapping) -> None:
         vector_store_id = normalize_vector_store_id(manifest.vector_store_id)
     except (ManifestPersistenceError, InvalidVectorStoreIdError, OSError):
         st.error(
-            "Phase 1 completion could not be confirmed from the persisted "
-            "manifest."
+            "Phase 1 completion could not be confirmed from the persisted " "manifest."
         )
         if st.button("Cancel", key="cancel_unconfirmed_setup"):
             _cancel_setup(state)
         return
 
+    if manifest.snapshot_state == "sealed":
+        state[SETUP_STEP_KEY] = "registration_ready"
+        st.rerun()
+
     st.subheader("Step 4 — Phase 1 complete")
     st.success("The new case foundation has been prepared.")
     st.write(f"**Case name:** {manifest.case_name}")
     st.write(f"**Technical case ID:** {state.get(SETUP_CASE_ID_KEY, '')}")
-    st.write(
-        f"**Associated vector store:** {mask_vector_store_id(vector_store_id)}"
-    )
+    st.write(f"**Associated vector store:** {mask_vector_store_id(vector_store_id)}")
     st.markdown(
         "- Manifest created\n"
         "- Empty vector store validated\n"
@@ -490,13 +597,10 @@ def _phase2_progress_callback(progress, status):
             completed_fraction = max(event.current_index - 1, 0)
             if event.kind in {"indexing_completed", "file_failed"}:
                 completed_fraction = event.current_index
-            progress.progress(
-                min(completed_fraction / event.total_candidates, 1.0)
-            )
-        if event.relative_path:
+            progress.progress(min(completed_fraction / event.total_candidates, 1.0))
+        if event.display_label:
             status.info(
-                f"{event.kind.replace('_', ' ').title()}: "
-                f"{event.relative_path}"
+                f"{event.kind.replace('_', ' ').title()}: " f"{event.display_label}"
             )
         elif event.sanitized_message:
             status.info(event.sanitized_message)
@@ -511,19 +615,23 @@ def _render_upload_preview(state: MutableMapping) -> None:
         _set_message(state, "error", "Select the VDR folder again.")
         st.rerun()
 
-    safe_retry_paths = state.get(SETUP_SAFE_RETRY_KEY, ())
-    if not isinstance(safe_retry_paths, (tuple, list, set, frozenset)):
-        safe_retry_paths = ()
+    authorization = state.get(SETUP_SAFE_RETRY_KEY)
+    if not isinstance(authorization, SafeRetryAuthorization):
+        authorization = None
     try:
         plan = prepare_manifest_upload(
             vdr_folder,
-            safe_retry_paths=safe_retry_paths,
+            safe_retry_authorization=authorization,
         )
     except UploadPreparationError as error:
         st.error(str(error))
         if st.button("Return to case selection", key="cancel_upload_preparation"):
             _cancel_setup(state)
         return
+
+    if authorization is None or authorization.context != plan.retry_context:
+        state.pop(SETUP_SAFE_RETRY_KEY, None)
+        authorization = None
 
     st.subheader("Step 5 — Upload preview")
     st.caption(
@@ -561,7 +669,7 @@ def _render_upload_preview(state: MutableMapping) -> None:
     )
     if recovery_count:
         st.warning(
-            "Some records require terminal-assisted recovery. Safe candidates "
+            "Some records require inspection or candidate rebuild. Safe candidates "
             "may still be uploaded, but readiness and registration remain blocked."
         )
 
@@ -605,7 +713,7 @@ def _render_upload_preview(state: MutableMapping) -> None:
             vdr_folder,
             client_factory=get_openai_client,
             progress_callback=_phase2_progress_callback(progress, status),
-            safe_retry_paths=safe_retry_paths,
+            safe_retry_authorization=authorization,
         )
     except Exception:
         state[SETUP_ACTION_KEY] = False
@@ -613,10 +721,23 @@ def _render_upload_preview(state: MutableMapping) -> None:
         st.info("Reload the persisted manifest status before trying another action.")
         return
     state[SETUP_UPLOAD_RESULT_KEY] = result
-    state[SETUP_SAFE_RETRY_KEY] = result.safe_retry_paths
+    state[SETUP_SAFE_RETRY_KEY] = result.safe_retry_authorization
     state[SETUP_ACTION_KEY] = False
     state[SETUP_STEP_KEY] = "upload_result"
     st.rerun()
+
+
+def _file_id_recovery_message(result: UploadBatchResult) -> str:
+    persisted = (result.recovery_details or {}).get("last_confirmed_persisted_state", {})
+    if persisted.get("openai_file_id") == result.recovery_file_id:
+        return (
+            "The OpenAI file ID is persisted, but indexing or its checkpoint needs "
+            "inspection. Preserve this ID and do not re-upload the file."
+        )
+    return (
+        "OpenAI returned a file ID, but persistence could not be confirmed. "
+        "Preserve this ID for inspection and do not re-upload the file."
+    )
 
 
 def _render_upload_result(state: MutableMapping) -> None:
@@ -644,7 +765,7 @@ def _render_upload_result(state: MutableMapping) -> None:
         st.dataframe(
             [
                 {
-                    "Relative path": item.relative_path,
+                    "Source": item.display_label,
                     "Outcome": item.outcome.replace("_", " "),
                     "Message": item.message,
                 }
@@ -654,12 +775,16 @@ def _render_upload_result(state: MutableMapping) -> None:
             width="stretch",
         )
 
-    if result.recovery_file_id is not None:
-        with st.expander("Critical file-ID recovery information"):
-            st.error(
-                "OpenAI returned a file ID, but it could not be saved. Do not "
-                "re-upload this file. Preserve this ID for terminal-assisted recovery."
+    if result.recovery_details:
+        with st.expander("Candidate recovery diagnostics"):
+            st.json(result.recovery_details)
+            st.info(
+                "Do not re-upload known or uncertain targets. If safe recovery is unavailable, preserve this candidate and create a fresh snapshot at a distinct location."
             )
+
+    if result.recovery_file_id is not None:
+        with st.expander("OpenAI file-ID recovery information"):
+            st.error(_file_id_recovery_message(result))
             st.code(result.recovery_file_id, language=None)
 
     readiness = assess_case_readiness(vdr_folder)
@@ -680,9 +805,7 @@ def _render_upload_result(state: MutableMapping) -> None:
         for reason in readiness.blocking_reasons:
             st.write(f"- {reason}")
         label = (
-            "Review safe retry"
-            if result.safe_retry_paths
-            else "Reload upload status"
+            "Review safe retry" if result.safe_retry_keys else "Reload upload status"
         )
         if st.button(label, key="review_upload_again"):
             state[SETUP_STEP_KEY] = "upload_preview"
@@ -745,7 +868,9 @@ def _render_registration(
     except CaseRegistryError as error:
         state[SETUP_ACTION_KEY] = False
         st.error(str(error))
-        st.info("Ingestion is unchanged. Registration can be retried safely.")
+        st.info(
+            "If sealing completed, the snapshot remains sealed. Registration can be retried safely."
+        )
         return
 
     state[SETUP_ACTION_KEY] = False
@@ -787,6 +912,8 @@ def render_new_case_setup(
     root = Path(repository_root).expanduser().resolve()
     if step == "preview":
         _render_preview(state)
+    elif step == "excel_preparation":
+        _render_excel_stage(state)
     elif step == "association":
         _render_association(state, registered_cases)
     elif step == "complete":

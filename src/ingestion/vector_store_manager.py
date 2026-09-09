@@ -7,6 +7,7 @@ files. Case-level lifecycle decisions live in ``case_vector_store.py``.
 from __future__ import annotations
 
 import re
+from src.ingestion.uploader import ingestion_client
 
 from openai import (
     APIConnectionError,
@@ -167,7 +168,7 @@ def create_vector_store(
     vector_store_name = f"VDR Assistant - {normalized_case_name}"
 
     try:
-        vector_store = client.vector_stores.create(name=vector_store_name)
+        vector_store = ingestion_client(client).vector_stores.create(name=vector_store_name)
     except Exception as error:
         if isinstance(error, AuthenticationError):
             detail = "OpenAI authentication failed."

@@ -4,8 +4,11 @@ from pathlib import PurePosixPath, PureWindowsPath
 
 from src.ingestion.manifest import VDRManifest
 from src.schemas.citation import Citation
-from src.schemas.evidence import RetrievedSearchResult, SourceReference
-
+from src.schemas.evidence import (
+    RetrievedSearchResult,
+    SourceReference,
+    ExcelSourceProvenance,
+)
 
 UNKNOWN_SOURCE = "Unknown source"
 
@@ -28,10 +31,7 @@ def format_vdr_breadcrumb(relative_path: str | None) -> str | None:
         return None
 
     parts = normalized.split("/")
-    if any(
-        not part.strip() or part.strip() in {".", ".."}
-        for part in parts
-    ):
+    if any(not part.strip() or part.strip() in {".", ".."} for part in parts):
         return None
 
     return "VDR → " + " → ".join(parts)
@@ -44,49 +44,52 @@ def _usable_text(value: object) -> str | None:
     return normalized or None
 
 
-def _fallback_label(citation: Citation) -> str:
-    return _usable_text(citation.filename) or UNKNOWN_SOURCE
-
-
 def resolve_citations(
-    citations: list[Citation],
-    manifest: VDRManifest | None,
-) -> list[str]:
-    """Resolve citations by OpenAI file ID while preserving their order."""
-
-    records_by_file_id: dict[str, list[object]] = {}
+    citations: list[Citation], manifest: VDRManifest | None
+) -> list[SourceReference]:
+    """Resolve exact IDs through an ambiguity-aware direct/worksheet multimap."""
+    by_id = {}
     if manifest is not None:
         for record in manifest.files:
-            file_id = _usable_text(record.openai_file_id)
-            if file_id is not None:
-                records_by_file_id.setdefault(file_id, []).append(record)
-
+            if record.openai_file_id:
+                by_id.setdefault(record.openai_file_id.strip(), []).append(
+                    (record, None)
+                )
+            for artifact in record.derived_artifacts:
+                if artifact.openai_file_id:
+                    by_id.setdefault(artifact.openai_file_id.strip(), []).append(
+                        (record, artifact)
+                    )
     resolved = []
     for citation in citations:
         file_id = _usable_text(citation.file_id)
-        matches = records_by_file_id.get(file_id, []) if file_id else []
-
+        source = SourceReference(file_id=file_id, display_name=UNKNOWN_SOURCE)
+        matches = by_id.get(file_id, [])
         if len(matches) == 1:
-            breadcrumb = format_vdr_breadcrumb(matches[0].relative_path)
+            record, artifact = matches[0]
+            breadcrumb = format_vdr_breadcrumb(record.relative_path)
             if breadcrumb is not None:
-                resolved.append(breadcrumb)
-                continue
-
-        resolved.append(_fallback_label(citation))
-
+                source.display_name = breadcrumb
+                if artifact is not None:
+                    source.display_name += " \u2192 " + artifact.worksheet_name
+                    source.excel_provenance = ExcelSourceProvenance(
+                        original_relative_path=record.relative_path,
+                        worksheet_name=artifact.worksheet_name,
+                    )
+        resolved.append(source)
     return resolved
 
 
 def build_source_references(
     citations: list[Citation],
-    source_files: list[str],
+    resolved_sources: list[SourceReference],
     search_results: list[RetrievedSearchResult],
 ) -> list[SourceReference]:
     """Associate retrieved passages with cited sources by file ID only."""
 
-    if len(citations) != len(source_files):
+    if len(citations) != len(resolved_sources):
         raise ValueError(
-            "citations and source_files must contain the same number of items"
+            "citations and resolved_sources must contain the same number of items"
         )
 
     candidates_by_file_id: dict[
@@ -129,16 +132,12 @@ def build_source_references(
         evidence_by_file_id[file_id] = evidence
 
     sources = []
-    for citation, display_name in zip(citations, source_files):
+    for citation, source in zip(citations, resolved_sources):
         file_id = _usable_text(citation.file_id)
-        sources.append(
-            SourceReference(
-                file_id=file_id,
-                display_name=display_name,
-                evidence=list(evidence_by_file_id.get(file_id, []))
-                if file_id is not None
-                else [],
-            )
+        if source.file_id != file_id:
+            raise ValueError("Resolved source identity does not match citation.")
+        source.evidence = (
+            list(evidence_by_file_id.get(file_id, [])) if file_id is not None else []
         )
-
+        sources.append(source)
     return sources

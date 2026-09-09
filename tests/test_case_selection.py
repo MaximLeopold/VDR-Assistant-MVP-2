@@ -17,6 +17,8 @@ from src.ui import case_selection, sidebar
 def manifest(case_name: str, vector_store_id: str) -> VDRManifest:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     return VDRManifest(
+        schema_version=2,
+        snapshot_state="sealed",
         case_name=case_name,
         vector_store_id=vector_store_id,
         created_at=now,
@@ -49,10 +51,9 @@ def make_registered_case(
 ) -> Path:
     vdr_folder = root / case_id / "VDR"
     vdr_folder.mkdir(parents=True)
-    create_manifest(
-        manifest(case_name, vector_store_id),
-        vdr_folder,
-    )
+    candidate=manifest(case_name,vector_store_id)
+    candidate.root_path=str(vdr_folder.resolve())
+    create_manifest(candidate,vdr_folder)
     return vdr_folder
 
 

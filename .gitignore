@@ -30,9 +30,6 @@ tmp/
 # Real VDR documents should not be committed
 *.pdf
 *.pptx
-*.xlsx
-*.xls
-*.xlsm
 *.docx
 
 # Logs
@@ -44,3 +41,6 @@ tmp/
 .idea/
 
 .test-tmp/
+
+# Assistant-managed Excel generations and attempts
+**/VDR Assistant/derived/excel/

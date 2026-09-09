@@ -133,10 +133,11 @@ def run_qa_chain(
 
         extracted = extract_response_data(raw_response)
         search_results = extract_search_results(raw_response)
-        source_files = resolve_citations(
+        resolved_sources = resolve_citations(
             citations=extracted["citations"],
             manifest=manifest,
         )
+        source_files = [source.display_name for source in resolved_sources]
 
         validated_answer = validate_answer(
             answer=extracted["answer"],
@@ -150,7 +151,7 @@ def run_qa_chain(
 
         sources = build_source_references(
             citations=extracted["citations"],
-            source_files=source_files,
+            resolved_sources=resolved_sources,
             search_results=search_results,
         )
         try:

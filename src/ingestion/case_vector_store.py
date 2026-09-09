@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Literal
 from openai import OpenAI
 
 from src.ingestion.manifest import VDRManifest
+from src.ingestion.excel_preprocessing import require_mutable
 from src.ingestion.manifest_persistence import (
     ManifestPersistenceError,
     load_manifest,
@@ -131,6 +132,20 @@ def _reject_conflict(
         )
 
 
+def _require_prepared_excel(manifest):
+    if any(
+        f.classification_status == "preprocess"
+        and (
+            f.excel_preprocessing is None
+            or f.excel_preprocessing.status not in {"completed", "excluded"}
+        )
+        for f in manifest.files
+    ):
+        raise CaseVectorStoreError(
+            "Complete or exclude every workbook before vector-store association."
+        )
+
+
 def adopt_case_vector_store(
     client: OpenAI,
     vdr_folder: str | Path,
@@ -138,35 +153,8 @@ def adopt_case_vector_store(
 ) -> CaseVectorStoreResult:
     """Explicitly validate and adopt an existing vector store for a case."""
 
-    manifest = load_manifest(vdr_folder)
-    candidate_id = normalize_vector_store_id(vector_store_id)
-    manifest_id = _normalized_manifest_id(manifest)
-    _reject_conflict(manifest_id, candidate_id)
-
-    remote = retrieve_vector_store(client, candidate_id)
-
-    if manifest_id == candidate_id:
-        return CaseVectorStoreResult(
-            manifest=manifest,
-            vector_store_id=candidate_id,
-            action="reused",
-            remote_name=_remote_name(remote),
-        )
-
-    manifest.vector_store_id = candidate_id
-    try:
-        save_manifest(manifest, vdr_folder)
-    except ManifestPersistenceError as error:
-        raise CaseVectorStorePersistenceError(
-            vector_store_id=candidate_id,
-            original_save_error=error,
-        ) from error
-
-    return CaseVectorStoreResult(
-        manifest=manifest,
-        vector_store_id=candidate_id,
-        action="adopted",
-        remote_name=_remote_name(remote),
+    raise CaseVectorStoreError(
+        "Populated-store adoption is disabled for Manifest v2. Use strict empty-store association with registered-case ownership checks."
     )
 
 
@@ -181,11 +169,18 @@ def associate_empty_case_vector_store(
 
     This is the strict normal path for a new unregistered case. It performs
     read-only OpenAI validation and one atomic local manifest save. Legacy
-    populated-store adoption remains the responsibility of
-    :func:`adopt_case_vector_store`.
+    populated-store adoption is disabled for Manifest v2.
     """
 
     manifest = load_manifest(vdr_folder)
+    from src.ingestion.case_readiness import manifest_belongs_to_folder
+
+    if not manifest_belongs_to_folder(manifest, vdr_folder):
+        raise CaseVectorStoreError(
+            "The manifest belongs to another source root; use a distinct snapshot location."
+        )
+    require_mutable(manifest)
+    _require_prepared_excel(manifest)
     candidate_id = normalize_vector_store_id(vector_store_id)
     manifest_id = _normalized_manifest_id(manifest)
     _reject_conflict(manifest_id, candidate_id)
@@ -202,8 +197,7 @@ def associate_empty_case_vector_store(
             continue
         if normalized_registered_id == candidate_id:
             raise CaseVectorStoreAlreadyUsedError(
-                "This vector store is already associated with another "
-                "prepared case."
+                "This vector store is already associated with another " "prepared case."
             )
 
     if manifest_id == candidate_id:
@@ -225,6 +219,14 @@ def associate_empty_case_vector_store(
     # Remote validation can take time. Reload before saving so a concurrent
     # local association cannot be overwritten with a stale manifest object.
     manifest = load_manifest(vdr_folder)
+    from src.ingestion.case_readiness import manifest_belongs_to_folder
+
+    if not manifest_belongs_to_folder(manifest, vdr_folder):
+        raise CaseVectorStoreError(
+            "The manifest belongs to another source root; use a distinct snapshot location."
+        )
+    require_mutable(manifest)
+    _require_prepared_excel(manifest)
     manifest_id = _normalized_manifest_id(manifest)
     _reject_conflict(manifest_id, candidate_id)
     if manifest_id == candidate_id:
@@ -238,15 +240,18 @@ def associate_empty_case_vector_store(
     manifest.vector_store_id = candidate_id
     try:
         save_manifest(manifest, vdr_folder)
+        verified = load_manifest(vdr_folder)
+        if verified.vector_store_id != manifest.vector_store_id:
+            raise ManifestPersistenceError(
+                "Vector-store association verification failed."
+            )
     except ManifestPersistenceError as error:
         raise CaseVectorStorePersistenceError(
             vector_store_id=candidate_id,
             original_save_error=error,
         ) from error
-    persisted = load_manifest(vdr_folder)
-
     return CaseVectorStoreResult(
-        manifest=persisted,
+        manifest=verified,
         vector_store_id=candidate_id,
         action="adopted",
         remote_name=_remote_name(remote),
@@ -263,6 +268,14 @@ def ensure_case_vector_store(
     """Ensure a case reuses, adopts, or explicitly creates one vector store."""
 
     manifest = load_manifest(vdr_folder)
+    from src.ingestion.case_readiness import manifest_belongs_to_folder
+
+    if not manifest_belongs_to_folder(manifest, vdr_folder):
+        raise CaseVectorStoreError(
+            "The manifest belongs to another source root; use a distinct snapshot location."
+        )
+    require_mutable(manifest)
+    _require_prepared_excel(manifest)
     manifest_id = _normalized_manifest_id(manifest)
     candidate_id = (
         normalize_vector_store_id(adoption_candidate)
@@ -281,20 +294,8 @@ def ensure_case_vector_store(
         )
 
     if candidate_id is not None:
-        remote = retrieve_vector_store(client, candidate_id)
-        manifest.vector_store_id = candidate_id
-        try:
-            save_manifest(manifest, vdr_folder)
-        except ManifestPersistenceError as error:
-            raise CaseVectorStorePersistenceError(
-                vector_store_id=candidate_id,
-                original_save_error=error,
-            ) from error
-        return CaseVectorStoreResult(
-            manifest=manifest,
-            vector_store_id=candidate_id,
-            action="adopted",
-            remote_name=_remote_name(remote),
+        raise CaseVectorStoreError(
+            "Use strict empty-store association with registered-case ownership checks."
         )
 
     if not allow_create:
@@ -310,6 +311,11 @@ def ensure_case_vector_store(
 
     try:
         save_manifest(manifest, vdr_folder)
+        verified = load_manifest(vdr_folder)
+        if verified.vector_store_id != manifest.vector_store_id:
+            raise ManifestPersistenceError(
+                "Vector-store association verification failed."
+            )
     except ManifestPersistenceError as error:
         raise VectorStoreCreatedButNotPersistedError(
             manifest=manifest,

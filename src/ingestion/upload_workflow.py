@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+import hashlib
+import json
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -13,10 +15,22 @@ from src.ingestion.file_filter import SUPPORTED_EXTENSIONS
 from src.ingestion.manifest import VDRFileRecord, VDRManifest
 from src.ingestion.manifest_persistence import (
     ManifestPersistenceError,
+    derive_manifest_paths,
     load_manifest,
     save_manifest,
 )
-from src.ingestion.uploader import attach_file_and_poll, upload_openai_file
+from src.ingestion.uploader import (
+    attach_file_and_poll,
+    upload_openai_file,
+    DefinitePreRemoteUploadError,
+)
+from src.ingestion.upload_targets import (
+    UploadTargetKey,
+    enumerate_upload_targets,
+    target_for_key,
+    preflight_target,
+)
+from src.ingestion.excel_preprocessing import require_mutable
 from src.ingestion.vector_store_manager import (
     InvalidVectorStoreIdError,
     normalize_vector_store_id,
@@ -29,14 +43,6 @@ class UploadWorkflowError(Exception):
 
 class UploadPreparationError(UploadWorkflowError):
     """Raised when a read-only upload plan cannot be constructed."""
-
-
-class DefinitePreRemoteUploadError(UploadWorkflowError):
-    """Signals that an upload failed before a remote file could exist.
-
-    The normal OpenAI adapter deliberately does not manufacture this signal.
-    It is available only to adapters that can prove the pre-remote boundary.
-    """
 
 
 class UploadDisposition(str, Enum):
@@ -60,7 +66,8 @@ class RecordClassification:
 
 @dataclass(frozen=True)
 class UploadPlanRow:
-    relative_path: str
+    key: UploadTargetKey
+    display_label: str
     extension: str
     size_bytes: int
     classification_status: str
@@ -73,7 +80,7 @@ class UploadPlanRow:
 
     def as_display_dict(self) -> dict[str, str | int]:
         return {
-            "Relative path": self.relative_path,
+            "Source": self.display_label,
             "Extension": self.extension,
             "Size (bytes)": self.size_bytes,
             "Upload": self.upload_status,
@@ -82,9 +89,7 @@ class UploadPlanRow:
             "Preflight": (
                 "passed"
                 if self.preflight_ok is True
-                else "blocked"
-                if self.preflight_ok is False
-                else "not applicable"
+                else "blocked" if self.preflight_ok is False else "not applicable"
             ),
             "Reason": self.blocking_reason or "",
         }
@@ -92,8 +97,58 @@ class UploadPlanRow:
 
 @dataclass(frozen=True)
 class UploadCandidate:
-    relative_path: str
+    key: UploadTargetKey
+    display_label: str
     local_path: Path
+
+
+@dataclass(frozen=True)
+class RetryCandidateContext:
+    vdr_folder: Path
+    manifest_path: Path
+    vector_store_id: str
+    manifest_identity: str
+
+
+@dataclass(frozen=True)
+class SafeRetryAuthorization:
+    """Session-only pre-remote proof bound to its originating snapshot."""
+
+    context: RetryCandidateContext
+    keys: tuple[UploadTargetKey, ...]
+
+
+def retry_candidate_context(manifest: VDRManifest, root: Path) -> RetryCandidateContext:
+    paths = derive_manifest_paths(root)
+    # created_at and all frozen snapshot content identify this candidate.
+    # Ordinary checkpoints change updated_at and target state, not this identity.
+    identity = manifest.model_dump(mode="json")
+    identity.pop("updated_at")
+    identity.pop("snapshot_state")
+    remote_fields = (
+        "openai_file_id", "upload_status", "indexing_status",
+        "upload_attempts", "last_error",
+    )
+    for source in identity["files"]:
+        for owner in (source, *source["derived_artifacts"]):
+            for field in remote_fields:
+                owner.pop(field)
+    digest = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        .encode("utf-8")
+    ).hexdigest()
+    return RetryCandidateContext(
+        paths.vdr_folder,
+        paths.manifest_path.resolve(),
+        normalize_vector_store_id(manifest.vector_store_id),
+        digest,
+    )
+
+
+def _authorized_retry_keys(authorization, context) -> tuple[UploadTargetKey, ...]:
+    if isinstance(authorization, SafeRetryAuthorization) and authorization.context == context:
+        return authorization.keys
+    return ()
 
 
 @dataclass(frozen=True)
@@ -101,6 +156,7 @@ class UploadPlan:
     vdr_folder: Path
     case_name: str
     vector_store_id: str
+    retry_context: RetryCandidateContext
     rows: tuple[UploadPlanRow, ...]
     candidates: tuple[UploadCandidate, ...]
     blockers: tuple[str, ...]
@@ -134,7 +190,8 @@ UploadEventKind = Literal[
 @dataclass(frozen=True)
 class UploadProgressEvent:
     kind: UploadEventKind
-    relative_path: str | None = None
+    key: UploadTargetKey | None = None
+    display_label: str | None = None
     current_index: int = 0
     total_candidates: int = 0
     upload_status: str | None = None
@@ -154,7 +211,8 @@ BatchFileOutcome = Literal[
 
 @dataclass(frozen=True)
 class BatchFileResult:
-    relative_path: str
+    key: UploadTargetKey
+    display_label: str
     outcome: BatchFileOutcome
     message: str
 
@@ -169,8 +227,14 @@ class UploadBatchResult:
     skipped_completed_count: int
     critically_stopped: bool
     message: str
-    safe_retry_paths: tuple[str, ...] = ()
+    safe_retry_authorization: SafeRetryAuthorization | None = None
     recovery_file_id: str | None = None
+    recovery_details: dict | None = None
+
+    @property
+    def safe_retry_keys(self) -> tuple[UploadTargetKey, ...]:
+        """Display/inspection only; keys alone cannot authorize a retry."""
+        return self.safe_retry_authorization.keys if self.safe_retry_authorization else ()
 
     @property
     def succeeded(self) -> bool:
@@ -210,22 +274,34 @@ def classify_manifest_record(
 ) -> RecordClassification:
     """Classify one record without guessing about ambiguous remote outcomes."""
 
-    if record.classification_status == "unsupported":
+    if getattr(record, "classification_status", "supported") == "unsupported":
         return RecordClassification(
             UploadDisposition.UNSUPPORTED, False, "Unsupported file type."
         )
-    if record.classification_status == "ignored":
+    if getattr(record, "classification_status", "supported") == "ignored":
         return RecordClassification(
             UploadDisposition.IGNORED, False, "Ignored during Phase 1."
         )
-    if record.classification_status == "error":
+    if getattr(record, "classification_status", "supported") == "error":
         return RecordClassification(
             UploadDisposition.CLASSIFICATION_ERROR,
             False,
             "Phase 1 classification failed.",
         )
 
+    if getattr(record, "classification_status", None) == "preprocess":
+        return RecordClassification(
+            UploadDisposition.RECOVERY_ONLY,
+            False,
+            "Workbook parents are never direct upload targets.",
+        )
     has_id = _has_file_id(record)
+    if record.openai_file_id is not None and not has_id:
+        return RecordClassification(
+            UploadDisposition.INCONSISTENT,
+            False,
+            "The persisted OpenAI file ID is unusable; do not re-upload.",
+        )
     if (
         has_id
         and record.upload_status == "uploaded"
@@ -290,11 +366,6 @@ def classify_manifest_record(
     )
 
 
-def _path_sort_key(relative_path: str) -> tuple[str, str]:
-    normalized = relative_path.replace("\\", "/")
-    return normalized.casefold(), normalized
-
-
 def preflight_manifest_record(
     vdr_folder: str | Path,
     record: VDRFileRecord,
@@ -337,7 +408,7 @@ def preflight_manifest_record(
 def prepare_manifest_upload(
     vdr_folder: str | Path,
     *,
-    safe_retry_paths: Iterable[str] = (),
+    safe_retry_authorization: SafeRetryAuthorization | None = None,
 ) -> UploadPlan:
     """Build a deterministic, read-only upload plan from the persisted manifest."""
 
@@ -359,65 +430,71 @@ def prepare_manifest_upload(
             "The manifest does not contain a vector-store ID."
         ) from error
 
-    known_safe = set(safe_retry_paths)
-    classified = [
-        (
-            record,
-            classify_manifest_record(
-                record,
-                known_safe_retry=record.relative_path in known_safe,
-            ),
+    try:
+        require_mutable(manifest)
+    except ManifestPersistenceError as error:
+        raise UploadPreparationError(str(error)) from error
+    context = retry_candidate_context(manifest, root)
+    known_safe = set(_authorized_retry_keys(safe_retry_authorization, context))
+    rows, candidates, blockers = [], [], []
+    for source in manifest.files:
+        if source.classification_status == "preprocess" and (
+            source.excel_preprocessing is None
+            or source.excel_preprocessing.status not in {"completed", "excluded"}
+        ):
+            blockers.append(f"{source.relative_path}: Excel preparation is incomplete.")
+        if source.classification_status in {"ignored", "unsupported", "error"}:
+            classification = classify_manifest_record(source)
+            rows.append(
+                UploadPlanRow(
+                    UploadTargetKey(source.relative_path),
+                    source.relative_path,
+                    source.extension,
+                    source.size_bytes,
+                    source.classification_status,
+                    source.upload_status,
+                    source.indexing_status,
+                    classification.disposition,
+                    False,
+                    None,
+                    classification.message,
+                )
+            )
+    for target in enumerate_upload_targets(manifest, root):
+        record = target.state_owner
+        classification = classify_manifest_record(
+            record, known_safe_retry=target.key in known_safe
         )
-        for record in manifest.files
-    ]
-    classified.sort(key=lambda item: _path_sort_key(item[0].relative_path))
-
-    rows: list[UploadPlanRow] = []
-    candidates: list[UploadCandidate] = []
-    blockers: list[str] = []
-    path_keys = [
-        record.relative_path.replace("\\", "/").casefold()
-        for record, _classification in classified
-    ]
-    if len(path_keys) != len(set(path_keys)):
-        blockers.append(
-            "The manifest contains duplicate relative file paths."
-        )
-    for record, classification in classified:
-        preflight_ok: bool | None = None
-        blocking_reason: str | None = None
+        preflight_ok = None
+        blocking_reason = None
         if classification.eligible:
-            local_path, blocking_reason = preflight_manifest_record(root, record)
+            local_path, blocking_reason = preflight_target(root, target)
             preflight_ok = blocking_reason is None
-            if blocking_reason is not None:
-                blockers.append(f"{record.relative_path}: {blocking_reason}")
-            elif local_path is not None:
+            if blocking_reason:
+                blockers.append(f"{target.display_label}: {blocking_reason}")
+            else:
                 candidates.append(
-                    UploadCandidate(
-                        relative_path=record.relative_path,
-                        local_path=local_path,
-                    )
+                    UploadCandidate(target.key, target.display_label, local_path)
                 )
         elif classification.disposition in {
             UploadDisposition.UNCERTAIN,
             UploadDisposition.RECOVERY_ONLY,
             UploadDisposition.INCONSISTENT,
-            UploadDisposition.CLASSIFICATION_ERROR,
         }:
             blocking_reason = classification.message
-
         rows.append(
             UploadPlanRow(
-                relative_path=record.relative_path,
-                extension=record.extension,
-                size_bytes=record.size_bytes,
-                classification_status=record.classification_status,
-                upload_status=record.upload_status,
-                indexing_status=record.indexing_status,
-                disposition=classification.disposition,
-                eligible=classification.eligible,
-                preflight_ok=preflight_ok,
-                blocking_reason=blocking_reason,
+                target.key,
+                target.display_label,
+                ".md" if target.artifact else target.source.extension,
+                record.size_bytes,
+                "supported",
+                record.upload_status,
+                record.indexing_status,
+                classification.disposition,
+                classification.eligible,
+                preflight_ok,
+                blocking_reason,
             )
         )
 
@@ -425,6 +502,7 @@ def prepare_manifest_upload(
         vdr_folder=root,
         case_name=manifest.case_name,
         vector_store_id=vector_store_id,
+        retry_context=context,
         rows=tuple(rows),
         candidates=tuple(candidates),
         blockers=tuple(blockers),
@@ -440,7 +518,14 @@ def mask_openai_file_id(file_id: str) -> str:
 
 def _emit(callback: ProgressCallback | None, event: UploadProgressEvent) -> None:
     if callback is not None:
-        callback(event)
+        try:
+            callback(event)
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Upload progress callback failed", exc_info=True
+            )
 
 
 def _remote_failure_message(remote_result: object) -> str:
@@ -448,22 +533,6 @@ def _remote_failure_message(remote_result: object) -> str:
     if isinstance(status, str) and status:
         return f"Remote indexing ended with status {status}."[:500]
     return "Remote indexing did not report completion."
-
-
-def _record_for_path(
-    manifest: VDRManifest,
-    relative_path: str,
-) -> VDRFileRecord:
-    matches = [
-        record
-        for record in manifest.files
-        if record.relative_path == relative_path
-    ]
-    if len(matches) != 1:
-        raise UploadWorkflowError(
-            "The manifest contains an ambiguous relative file path."
-        )
-    return matches[0]
 
 
 def _result(
@@ -474,24 +543,58 @@ def _result(
     message: str,
     recovery_file_id: str | None = None,
 ) -> UploadBatchResult:
+    diagnostics = []
+    for item in files:
+        if item.outcome not in {"needs_recovery", "indexing_failed"}:
+            continue
+        known_id = recovery_file_id if item is files[-1] else None
+        try:
+            persisted = target_for_key(
+                load_manifest(plan.vdr_folder), plan.vdr_folder, item.key
+            ).state_owner
+            confirmed = persisted.model_dump(mode="json")
+            known_id = known_id or persisted.openai_file_id
+        except Exception:
+            confirmed = {"state": "unavailable; preserve this diagnostic"}
+        diagnostics.append(
+            {
+                "manifest": str(
+                    plan.vdr_folder.parent / "VDR Assistant" / "manifest.json"
+                ),
+                "vector_store_id": plan.vector_store_id,
+                "source_relative_path": item.key.source_relative_path,
+                "artifact_id": item.key.artifact_id,
+                "worksheet_label": item.display_label,
+                "openai_file_id": known_id,
+                "failed_checkpoint": item.message,
+                "last_confirmed_persisted_state": confirmed,
+            }
+        )
+    recovery_details = diagnostics[-1] if diagnostics else None
+    if recovery_details:
+        recovery_file_id = recovery_file_id or recovery_details["openai_file_id"]
+        if len(diagnostics) > 1:
+            recovery_details["other_targets"] = diagnostics[:-1]
     return UploadBatchResult(
         plan=plan,
         files=tuple(files),
         completed_count=sum(item.outcome == "completed" for item in files),
-        safely_retryable_count=sum(
-            item.outcome == "safe_retry" for item in files
-        ),
+        safely_retryable_count=sum(item.outcome == "safe_retry" for item in files),
         recovery_count=sum(
-            item.outcome in {"needs_recovery", "indexing_failed"}
-            for item in files
+            item.outcome in {"needs_recovery", "indexing_failed"} for item in files
         ),
         skipped_completed_count=plan.count(UploadDisposition.COMPLETED),
         critically_stopped=critically_stopped,
         message=message,
-        safe_retry_paths=tuple(
-            item.relative_path for item in files if item.outcome == "safe_retry"
+        safe_retry_authorization=(
+            SafeRetryAuthorization(
+                plan.retry_context,
+                tuple(item.key for item in files if item.outcome == "safe_retry"),
+            )
+            if any(item.outcome == "safe_retry" for item in files) else None
         ),
         recovery_file_id=recovery_file_id,
+        recovery_details=recovery_details,
     )
 
 
@@ -500,15 +603,16 @@ def run_manifest_upload(
     *,
     client_factory: ClientFactory,
     progress_callback: ProgressCallback | None = None,
-    safe_retry_paths: Iterable[str] = (),
+    safe_retry_authorization: SafeRetryAuthorization | None = None,
     upload_file: Callable[[object, Path], object] = upload_openai_file,
     attach_file: Callable[[object, str, str], object] = attach_file_and_poll,
     manifest_saver: Callable[[VDRManifest, str | Path], Path] = save_manifest,
 ) -> UploadBatchResult:
     """Revalidate and sequentially upload all safe manifest candidates."""
 
-    retry_paths = tuple(safe_retry_paths)
-    plan = prepare_manifest_upload(vdr_folder, safe_retry_paths=retry_paths)
+    plan = prepare_manifest_upload(
+        vdr_folder, safe_retry_authorization=safe_retry_authorization
+    )
     if plan.blockers:
         return _result(
             plan,
@@ -545,13 +649,12 @@ def run_manifest_upload(
 
     _emit(
         progress_callback,
-        UploadProgressEvent(
-            "batch_started", total_candidates=len(plan.candidates)
-        ),
+        UploadProgressEvent("batch_started", total_candidates=len(plan.candidates)),
     )
     try:
         manifest = load_manifest(plan.vdr_folder)
         vector_store_id = normalize_vector_store_id(manifest.vector_store_id)
+        current_context = retry_candidate_context(manifest, plan.vdr_folder)
     except (ManifestPersistenceError, InvalidVectorStoreIdError, OSError):
         result = _result(
             plan,
@@ -571,6 +674,7 @@ def run_manifest_upload(
     if (
         not manifest_belongs_to_folder(manifest, plan.vdr_folder)
         or vector_store_id != plan.vector_store_id
+        or current_context != plan.retry_context
     ):
         result = _result(
             plan,
@@ -588,13 +692,44 @@ def run_manifest_upload(
         )
         return result
 
+    retry_keys = _authorized_retry_keys(safe_retry_authorization, current_context)
     file_results: list[BatchFileResult] = []
     total = len(plan.candidates)
     for index, candidate in enumerate(plan.candidates, start=1):
-        record = _record_for_path(manifest, candidate.relative_path)
+        target = target_for_key(manifest, plan.vdr_folder, candidate.key)
+        record = target.state_owner
+        require_mutable(load_manifest(plan.vdr_folder))
+
+        def checkpoint():
+            try:
+                manifest_saver(manifest, plan.vdr_folder)
+                persisted = load_manifest(plan.vdr_folder)
+                if (
+                    persisted.vector_store_id != plan.vector_store_id
+                    or retry_candidate_context(persisted, plan.vdr_folder) != plan.retry_context
+                    or target_for_key(
+                        persisted, plan.vdr_folder, candidate.key
+                    ).state_owner.model_dump()
+                    != record.model_dump()
+                ):
+                    raise ManifestPersistenceError(
+                        "Upload target checkpoint verification failed."
+                    )
+            except ManifestPersistenceError:
+                import logging
+
+                logging.getLogger(__name__).exception(
+                    "Upload checkpoint failed for %s", candidate.key
+                )
+                raise
+            except Exception as error:
+                raise ManifestPersistenceError(
+                    "Upload target checkpoint failed."
+                ) from error
+
         classification = classify_manifest_record(
             record,
-            known_safe_retry=record.relative_path in retry_paths,
+            known_safe_retry=candidate.key in retry_keys,
         )
         if not classification.eligible:
             result = _result(
@@ -607,7 +742,8 @@ def run_manifest_upload(
                 progress_callback,
                 UploadProgressEvent(
                     "batch_stopped",
-                    relative_path=record.relative_path,
+                    key=candidate.key,
+                    display_label=target.display_label,
                     current_index=index,
                     total_candidates=total,
                     sanitized_message=result.message,
@@ -619,17 +755,26 @@ def run_manifest_upload(
             progress_callback,
             UploadProgressEvent(
                 "file_started",
-                relative_path=record.relative_path,
+                key=candidate.key,
+                display_label=target.display_label,
                 current_index=index,
                 total_candidates=total,
             ),
         )
+        verified_path, preflight_error = preflight_target(plan.vdr_folder, target)
+        if preflight_error:
+            return _result(
+                plan,
+                file_results,
+                critically_stopped=True,
+                message=f"{target.display_label}: {preflight_error}",
+            )
         record.upload_attempts += 1
         record.upload_status = "uploading"
         record.indexing_status = "not_started"
         record.last_error = None
         try:
-            manifest_saver(manifest, plan.vdr_folder)
+            checkpoint()
         except ManifestPersistenceError:
             result = _result(
                 plan,
@@ -641,7 +786,8 @@ def run_manifest_upload(
                 progress_callback,
                 UploadProgressEvent(
                     "batch_stopped",
-                    relative_path=record.relative_path,
+                    key=candidate.key,
+                    display_label=target.display_label,
                     current_index=index,
                     total_candidates=total,
                     sanitized_message=result.message,
@@ -652,7 +798,8 @@ def run_manifest_upload(
             progress_callback,
             UploadProgressEvent(
                 "manifest_marked_uploading",
-                relative_path=record.relative_path,
+                key=candidate.key,
+                display_label=target.display_label,
                 current_index=index,
                 total_candidates=total,
                 upload_status=record.upload_status,
@@ -661,7 +808,7 @@ def run_manifest_upload(
         )
 
         try:
-            uploaded = upload_file(client, candidate.local_path)
+            uploaded = upload_file(client, verified_path)
         except DefinitePreRemoteUploadError:
             record.openai_file_id = None
             record.upload_status = "failed"
@@ -670,7 +817,7 @@ def run_manifest_upload(
                 "Upload did not start remotely; explicit same-session retry is safe."
             )
             try:
-                manifest_saver(manifest, plan.vdr_folder)
+                checkpoint()
             except ManifestPersistenceError:
                 result = _result(
                     plan,
@@ -682,7 +829,8 @@ def run_manifest_upload(
                     progress_callback,
                     UploadProgressEvent(
                         "batch_stopped",
-                        relative_path=record.relative_path,
+                        key=candidate.key,
+                        display_label=target.display_label,
                         current_index=index,
                         total_candidates=total,
                         sanitized_message=result.message,
@@ -690,7 +838,8 @@ def run_manifest_upload(
                 )
                 return result
             item = BatchFileResult(
-                record.relative_path,
+                candidate.key,
+                target.display_label,
                 "safe_retry",
                 "Upload did not start remotely; explicit retry is safe in this session.",
             )
@@ -699,7 +848,8 @@ def run_manifest_upload(
                 progress_callback,
                 UploadProgressEvent(
                     "file_failed",
-                    relative_path=record.relative_path,
+                    key=candidate.key,
+                    display_label=target.display_label,
                     current_index=index,
                     total_candidates=total,
                     outcome=item.outcome,
@@ -715,13 +865,13 @@ def run_manifest_upload(
                 "Upload outcome is uncertain; terminal-assisted recovery is required."
             )
             try:
-                manifest_saver(manifest, plan.vdr_folder)
+                checkpoint()
             except ManifestPersistenceError:
                 message = "The uncertain upload state could not be checkpointed."
             else:
                 message = record.last_error
             item = BatchFileResult(
-                record.relative_path, "needs_recovery", message
+                candidate.key, target.display_label, "needs_recovery", message
             )
             file_results.append(item)
             result = _result(
@@ -734,7 +884,8 @@ def run_manifest_upload(
                 progress_callback,
                 UploadProgressEvent(
                     "batch_stopped",
-                    relative_path=record.relative_path,
+                    key=candidate.key,
+                    display_label=target.display_label,
                     current_index=index,
                     total_candidates=total,
                     outcome=item.outcome,
@@ -748,17 +899,15 @@ def run_manifest_upload(
             record.openai_file_id = None
             record.upload_status = "uploading"
             record.indexing_status = "not_started"
-            record.last_error = (
-                "OpenAI did not return a usable file ID; the upload outcome is uncertain."
-            )
+            record.last_error = "OpenAI did not return a usable file ID; the upload outcome is uncertain."
             try:
-                manifest_saver(manifest, plan.vdr_folder)
+                checkpoint()
             except ManifestPersistenceError:
                 message = "The uncertain upload state could not be checkpointed."
             else:
                 message = record.last_error
             item = BatchFileResult(
-                record.relative_path, "needs_recovery", message
+                candidate.key, target.display_label, "needs_recovery", message
             )
             file_results.append(item)
             result = _result(
@@ -771,7 +920,8 @@ def run_manifest_upload(
                 progress_callback,
                 UploadProgressEvent(
                     "batch_stopped",
-                    relative_path=record.relative_path,
+                    key=candidate.key,
+                    display_label=target.display_label,
                     current_index=index,
                     total_candidates=total,
                     outcome=item.outcome,
@@ -780,26 +930,16 @@ def run_manifest_upload(
             )
             return result
         uploaded_id = uploaded_id.strip()
-        _emit(
-            progress_callback,
-            UploadProgressEvent(
-                "file_uploaded",
-                relative_path=record.relative_path,
-                current_index=index,
-                total_candidates=total,
-                masked_file_id=mask_openai_file_id(uploaded_id),
-            ),
-        )
-
         record.openai_file_id = uploaded_id
         record.upload_status = "uploaded"
         record.indexing_status = "not_started"
         record.last_error = None
         try:
-            manifest_saver(manifest, plan.vdr_folder)
+            checkpoint()
         except ManifestPersistenceError:
             item = BatchFileResult(
-                record.relative_path,
+                candidate.key,
+                target.display_label,
                 "needs_recovery",
                 "The returned file ID could not be persisted; do not re-upload.",
             )
@@ -815,7 +955,8 @@ def run_manifest_upload(
                 progress_callback,
                 UploadProgressEvent(
                     "batch_stopped",
-                    relative_path=record.relative_path,
+                    key=candidate.key,
+                    display_label=target.display_label,
                     current_index=index,
                     total_candidates=total,
                     outcome=item.outcome,
@@ -827,8 +968,21 @@ def run_manifest_upload(
         _emit(
             progress_callback,
             UploadProgressEvent(
+                "file_uploaded",
+                key=candidate.key,
+                display_label=target.display_label,
+                current_index=index,
+                total_candidates=total,
+                masked_file_id=mask_openai_file_id(uploaded_id),
+            ),
+        )
+
+        _emit(
+            progress_callback,
+            UploadProgressEvent(
                 "file_id_persisted",
-                relative_path=record.relative_path,
+                key=candidate.key,
+                display_label=target.display_label,
                 current_index=index,
                 total_candidates=total,
                 upload_status=record.upload_status,
@@ -839,10 +993,11 @@ def run_manifest_upload(
 
         record.indexing_status = "in_progress"
         try:
-            manifest_saver(manifest, plan.vdr_folder)
+            checkpoint()
         except ManifestPersistenceError:
             item = BatchFileResult(
-                record.relative_path,
+                candidate.key,
+                target.display_label,
                 "needs_recovery",
                 "The indexing checkpoint could not be saved; attachment did not start.",
             )
@@ -857,7 +1012,8 @@ def run_manifest_upload(
                 progress_callback,
                 UploadProgressEvent(
                     "batch_stopped",
-                    relative_path=record.relative_path,
+                    key=candidate.key,
+                    display_label=target.display_label,
                     current_index=index,
                     total_candidates=total,
                     outcome=item.outcome,
@@ -869,7 +1025,8 @@ def run_manifest_upload(
             progress_callback,
             UploadProgressEvent(
                 "attachment_started",
-                relative_path=record.relative_path,
+                key=candidate.key,
+                display_label=target.display_label,
                 current_index=index,
                 total_candidates=total,
                 upload_status=record.upload_status,
@@ -879,16 +1036,12 @@ def run_manifest_upload(
         )
 
         try:
-            remote_result = attach_file(
-                client, vector_store_id, uploaded_id
-            )
+            remote_result = attach_file(client, vector_store_id, uploaded_id)
             remote_status = getattr(remote_result, "status", None)
         except Exception:
             record.upload_status = "uploaded"
             record.indexing_status = "in_progress"
-            record.last_error = (
-                "Attachment or polling was interrupted; remote status requires recovery."
-            )
+            record.last_error = "Attachment or polling was interrupted; remote status requires recovery."
             outcome: BatchFileOutcome = "needs_recovery"
             message = record.last_error
         else:
@@ -906,10 +1059,11 @@ def run_manifest_upload(
                 message = record.last_error
 
         try:
-            manifest_saver(manifest, plan.vdr_folder)
+            checkpoint()
         except ManifestPersistenceError:
             item = BatchFileResult(
-                record.relative_path,
+                candidate.key,
+                target.display_label,
                 "needs_recovery",
                 "The terminal indexing state could not be saved.",
             )
@@ -924,7 +1078,8 @@ def run_manifest_upload(
                 progress_callback,
                 UploadProgressEvent(
                     "batch_stopped",
-                    relative_path=record.relative_path,
+                    key=candidate.key,
+                    display_label=target.display_label,
                     current_index=index,
                     total_candidates=total,
                     outcome=item.outcome,
@@ -933,13 +1088,14 @@ def run_manifest_upload(
             )
             return result
 
-        item = BatchFileResult(record.relative_path, outcome, message)
+        item = BatchFileResult(candidate.key, target.display_label, outcome, message)
         file_results.append(item)
         _emit(
             progress_callback,
             UploadProgressEvent(
                 "indexing_completed" if outcome == "completed" else "file_failed",
-                relative_path=record.relative_path,
+                key=candidate.key,
+                display_label=target.display_label,
                 current_index=index,
                 total_candidates=total,
                 upload_status=record.upload_status,

@@ -48,6 +48,7 @@ def make_external_vdr(tmp_path: Path) -> tuple[Path, Path]:
 def make_blank_manifest(vdr_folder: Path) -> VDRManifest:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     return VDRManifest(
+        schema_version=2,
         case_name=vdr_folder.parent.name,
         root_path=str(vdr_folder.resolve()),
         vector_store_id=None,
@@ -156,7 +157,8 @@ def test_scan_preview_is_sorted_read_only_and_fingerprinted(
     assert preview.state == "scan_preview"
     assert preview.total_files == 5
     assert preview.supported_files == 2
-    assert preview.unsupported_files == 1
+    assert preview.unsupported_files == 0
+    assert preview.preprocess_files == 1
     assert preview.ignored_files == 2
     assert [row.relative_path for row in preview.rows] == [
         "empty.txt",
@@ -197,7 +199,7 @@ def test_zero_supported_files_show_preview_but_block_creation(
     tmp_path: Path,
 ) -> None:
     repository_root, vdr_folder = make_external_vdr(tmp_path)
-    (vdr_folder / "table.xlsx").write_bytes(b"unsupported")
+    (vdr_folder / "table.xls").write_bytes(b"unsupported")
 
     preview = build_new_case_preview(
         str(vdr_folder),
@@ -207,7 +209,7 @@ def test_zero_supported_files_show_preview_but_block_creation(
     )
 
     assert preview.supported_files == 0
-    assert preview.blockers == ("No supported documents were found.",)
+    assert preview.blockers == ("No supported documents or preprocessable workbooks were found.",)
     assert not preview.can_create_manifest
 
 
@@ -374,7 +376,7 @@ def test_manifest_is_created_once_with_existing_schema_defaults(
     persisted = load_manifest(vdr_folder)
 
     assert result.manifest_path == derive_manifest_paths(vdr_folder).manifest_path
-    assert persisted.schema_version == 1
+    assert persisted.schema_version == 2
     assert persisted.vector_store_id is None
     assert persisted.files[0].upload_status == "not_uploaded"
     assert persisted.files[0].indexing_status == "not_started"

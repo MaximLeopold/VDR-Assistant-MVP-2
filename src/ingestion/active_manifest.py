@@ -31,7 +31,7 @@ def load_active_manifest(
     except (ManifestPersistenceError, InvalidVectorStoreIdError, OSError):
         return None
 
-    if manifest_id != selected_id:
+    if manifest_id != selected_id or manifest.snapshot_state != "sealed":
         return None
 
     return manifest

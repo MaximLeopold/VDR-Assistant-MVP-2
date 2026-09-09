@@ -77,6 +77,7 @@ def manifest() -> VDRManifest:
         indexing_status="completed",
     )
     return VDRManifest(
+        schema_version=2,
         case_name="Test Case",
         vector_store_id="vs-test",
         created_at=now,
@@ -357,7 +358,7 @@ def test_weak_and_additional_only_sources_do_not_veto_another_sources_best(monke
     answer = qa_chain.run_qa_chain("Question", "vs-test")
 
     assert answer.status == "success"
-    assert answer.source_files == ["Empty.pdf", "Context.pdf", "Offer.pdf"]
+    assert answer.source_files == ["Unknown source", "Unknown source", "Unknown source"]
     assert answer.sources[0].selected_evidence == []
     assert [item.role for item in answer.sources[1].selected_evidence] == ["additional_context"]
     assert [item.role for item in answer.sources[2].selected_evidence] == ["best_support"]

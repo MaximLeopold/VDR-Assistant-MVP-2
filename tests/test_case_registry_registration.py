@@ -37,6 +37,7 @@ def make_case(
         indexing_status="completed" if ready else "not_started",
     )
     manifest = VDRManifest(
+        schema_version=2,
         case_name=f"Case {name}",
         root_path=str(vdr_folder.resolve()),
         vector_store_id=f"vs_{name.lower()}",
@@ -222,6 +223,8 @@ def test_fsync_failure_preserves_original_registry(
     registry_path, _ = registry_with_existing(tmp_path)
     candidate = make_case(tmp_path, "Candidate")
     original = registry_path.read_bytes()
+    from src.ingestion.manifest_persistence import load_manifest, save_manifest
+    sealed=load_manifest(candidate);sealed.snapshot_state='sealed';save_manifest(sealed,candidate)
     monkeypatch.setattr(
         case_registry.os,
         "fsync",

@@ -91,6 +91,7 @@ class NewCasePreview:
     ignored_files: int
     error_files: int
     rows: tuple[NewCasePreviewRow, ...]
+    preprocess_files: int = 0
     fingerprint: str | None = None
     blockers: tuple[str, ...] = ()
 
@@ -247,6 +248,7 @@ def _preview_from_manifest(
         state=state,
         total_files=manifest.total_files,
         supported_files=manifest.supported_files,
+        preprocess_files=manifest.preprocess_files,
         unsupported_files=manifest.unsupported_files,
         ignored_files=manifest.ignored_files,
         error_files=manifest.error_files,
@@ -282,6 +284,9 @@ def build_new_case_preview(
                 "An existing manifest is invalid or unreadable. It was not changed."
             ) from error
 
+        from src.ingestion.case_readiness import manifest_belongs_to_folder
+        if not manifest_belongs_to_folder(manifest,vdr_folder):
+            raise NewCaseValidationError("This source root collides with another snapshot location. Use a distinct case-root location.")
         vector_store_id = _manifest_vector_store_id(manifest)
         state = "phase1_complete" if vector_store_id is not None else "resume_association"
         return _preview_from_manifest(
@@ -306,8 +311,8 @@ def build_new_case_preview(
         )
 
     blockers = (
-        ("No supported documents were found.",)
-        if manifest.supported_files == 0
+        ("No supported documents or preprocessable workbooks were found.",)
+        if manifest.supported_files + manifest.preprocess_files == 0
         else ()
     )
     return _preview_from_manifest(
@@ -344,8 +349,8 @@ def create_new_case_manifest(
             "The selected folder could not be scanned safely."
         ) from error
 
-    if manifest.supported_files == 0:
-        raise NewCaseValidationError("No supported documents were found.")
+    if manifest.supported_files + manifest.preprocess_files == 0:
+        raise NewCaseValidationError("No supported documents or preprocessable workbooks were found.")
     if manifest_preview_fingerprint(manifest) != reviewed_fingerprint:
         raise StalePreviewError(
             "The folder contents changed after the preview. Scan the folder "
