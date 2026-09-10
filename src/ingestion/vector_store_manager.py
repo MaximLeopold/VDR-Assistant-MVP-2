@@ -7,7 +7,7 @@ files. Case-level lifecycle decisions live in ``case_vector_store.py``.
 from __future__ import annotations
 
 import re
-from src.ingestion.uploader import ingestion_client
+from src.ingestion.openai_policy import mutation_client, read_client
 
 from openai import (
     APIConnectionError,
@@ -84,9 +84,7 @@ def normalize_vector_store_id(vector_store_id: str) -> str:
     """Return a trimmed non-empty vector-store ID."""
 
     if not isinstance(vector_store_id, str) or not vector_store_id.strip():
-        raise InvalidVectorStoreIdError(
-            "The OpenAI vector-store ID must not be blank."
-        )
+        raise InvalidVectorStoreIdError("The OpenAI vector-store ID must not be blank.")
     return vector_store_id.strip()
 
 
@@ -137,7 +135,7 @@ def retrieve_vector_store(
     requested_id = normalize_vector_store_id(vector_store_id)
 
     try:
-        vector_store = client.vector_stores.retrieve(requested_id)
+        vector_store = read_client(client).vector_stores.retrieve(requested_id)
     except Exception as error:
         _raise_retrieval_error(error)
         raise  # pragma: no cover - _raise_retrieval_error always raises
@@ -145,8 +143,7 @@ def retrieve_vector_store(
     returned_id = getattr(vector_store, "id", None)
     if returned_id != requested_id:
         raise VectorStoreIdMismatchError(
-            "OpenAI returned a vector store whose ID did not match "
-            "the requested ID."
+            "OpenAI returned a vector store whose ID did not match " "the requested ID."
         )
 
     return vector_store
@@ -168,7 +165,9 @@ def create_vector_store(
     vector_store_name = f"VDR Assistant - {normalized_case_name}"
 
     try:
-        vector_store = ingestion_client(client).vector_stores.create(name=vector_store_name)
+        vector_store = mutation_client(client).vector_stores.create(
+            name=vector_store_name
+        )
     except Exception as error:
         if isinstance(error, AuthenticationError):
             detail = "OpenAI authentication failed."
@@ -207,7 +206,7 @@ def list_vector_store_files(
     requested_id = normalize_vector_store_id(vector_store_id)
 
     try:
-        page = client.vector_stores.files.list(requested_id)
+        page = read_client(client).vector_stores.files.list(requested_id)
         return list(page)
     except Exception as error:
         _raise_retrieval_error(error)
@@ -221,13 +220,11 @@ def retrieve_openai_file(
     """Retrieve and validate one underlying OpenAI File object."""
 
     if not isinstance(file_id, str) or not file_id.strip():
-        raise InvalidOpenAIFileIdError(
-            "The OpenAI file ID must not be blank."
-        )
+        raise InvalidOpenAIFileIdError("The OpenAI file ID must not be blank.")
     requested_id = file_id.strip()
 
     try:
-        openai_file = client.files.retrieve(requested_id)
+        openai_file = read_client(client).files.retrieve(requested_id)
     except Exception as error:
         _raise_retrieval_error(error)
         raise  # pragma: no cover - _raise_retrieval_error always raises

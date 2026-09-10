@@ -43,6 +43,8 @@ class FakeFiles:
     def __init__(self):
         self.calls = []
         self.attach_calls = []
+        self.status_calls = []
+        self.statuses = {}
 
     def list(self, vector_store_id):
         self.calls.append(vector_store_id)
@@ -50,7 +52,17 @@ class FakeFiles:
 
     def create(self, file_id, *, vector_store_id):
         self.attach_calls.append((vector_store_id, file_id))
-        return SimpleNamespace(status="completed")
+        return SimpleNamespace(
+            status="completed", id=file_id, vector_store_id=vector_store_id
+        )
+
+    def retrieve(self, file_id, *, vector_store_id):
+        from test_ingestion_recovery import api_error, attachment
+
+        self.status_calls.append((vector_store_id, file_id))
+        if file_id not in self.statuses:
+            raise api_error()
+        return attachment(file_id, vector_store_id, self.statuses[file_id])
 
 
 class FakeOpenAIFiles:
@@ -60,6 +72,9 @@ class FakeOpenAIFiles:
     def create(self, *, file, purpose):
         self.create_calls.append((Path(file.name).name, purpose))
         return SimpleNamespace(id=f"file_{Path(file.name).stem}")
+
+    def retrieve(self, file_id):
+        return SimpleNamespace(id=file_id)
 
 
 class FakeVectorStores:
@@ -84,6 +99,67 @@ def button_with_label(app: AppTest, label: str):
 
 def input_with_label(app: AppTest, label: str):
     return next(widget for widget in app.text_input if widget.label == label)
+
+
+def test_streamlit_recovery_after_session_loss_and_explicit_same_id_attach(
+    tmp_path, monkeypatch
+):
+    from test_upload_workflow import make_case
+    from test_ingestion_recovery import known
+
+    registered = make_registered_case(tmp_path)
+    registry = tmp_path / "cases.json"
+    registry.write_text(
+        json.dumps({"cases": [{"case_id": "existing", "vdr_folder": str(registered)}]})
+    )
+    root = make_case(tmp_path / "candidate", ("a.pdf", "b.pdf"))
+    known(root)
+    client = FakeClient()
+    monkeypatch.setattr(settings, "CASE_REGISTRY_PATH", str(registry))
+    monkeypatch.setattr(new_case_ui, "get_openai_client", lambda: client)
+    monkeypatch.setattr(new_case_ui, "validate_settings", lambda: [])
+
+    def fresh_session():
+        app = AppTest.from_file("app/main.py")
+        for key, value in {
+            new_case_ui.SETUP_ACTIVE_KEY: True,
+            new_case_ui.SETUP_STEP_KEY: "upload_preview",
+            new_case_ui.SETUP_FOLDER_KEY: str(root),
+            new_case_ui.SETUP_CASE_ID_KEY: "candidate",
+        }.items():
+            app.session_state[key] = value
+        return app.run()
+
+    app = fresh_session()
+    assert not app.exception
+    assert (
+        not client.vector_stores.files.status_calls
+    )  # Local preview is not a remote refresh.
+    button_with_label(app, "Refresh / recover known files").click().run()
+    assert not app.exception
+    assert len(client.vector_stores.files.status_calls) == 2
+    assert client.files.create_calls == client.vector_stores.files.attach_calls == []
+    assert any(b.label == "Attach existing file" for b in app.button)
+    del app
+    app = (
+        fresh_session()
+    )  # No prior result/proof survives; recovery can be rediscovered.
+    assert not any(b.label == "Attach existing file" for b in app.button)
+    button_with_label(app, "Refresh / recover known files").click().run()
+    button_with_label(app, "Attach existing file").click().run()
+    assert not app.exception
+    assert len(client.vector_stores.files.status_calls) == 6
+    assert client.vector_stores.files.attach_calls == [
+        ("vs_manifest_owned", "file_known")
+    ]
+    assert client.files.create_calls == []
+    assert load_manifest(root).files[0].indexing_status == "completed"
+    assert load_manifest(root).files[1].upload_attempts == 0
+    assert not any(b.label == "Continue to registration" for b in app.button)
+    button_with_label(app, "Continue ingestion").click().run()
+    assert not app.exception
+    assert client.files.create_calls == [("b.pdf", "assistants")]
+    assert any(b.label == "Continue to registration" for b in app.button)
 
 
 def test_setup_state_does_not_change_active_case_and_cancel_is_local() -> None:
@@ -220,11 +296,7 @@ def test_phase2_streamlit_flow_previews_uploads_and_registers_with_fake_client(
     registry_path = tmp_path / "cases.json"
     registry_path.write_text(
         json.dumps(
-            {
-                "cases": [
-                    {"case_id": "existing", "vdr_folder": str(existing_vdr)}
-                ]
-            }
+            {"cases": [{"case_id": "existing", "vdr_folder": str(existing_vdr)}]}
         ),
         encoding="utf-8",
     )
@@ -251,12 +323,12 @@ def test_phase2_streamlit_flow_previews_uploads_and_registers_with_fake_client(
     button_with_label(app, "Continue case preparation").click().run()
 
     assert len(app.exception) == 0
-    assert any("Upload preview" in item.value for item in app.subheader)
+    assert any("Ingestion preview" in item.value for item in app.subheader)
     assert fake_client.files.create_calls == []
     assert fake_client.vector_stores.files.attach_calls == []
     assert load_manifest(new_vdr).files[0].upload_status == "not_uploaded"
 
-    button_with_label(app, "Upload and index all eligible files").click().run()
+    button_with_label(app, "Continue ingestion").click().run()
 
     assert len(app.exception) == 0
     assert fake_client.files.create_calls == [("document.pdf", "assistants")]
@@ -295,11 +367,7 @@ def test_restart_resume_reuses_associated_manifest_and_preview_is_read_only(
     registry_path = tmp_path / "cases.json"
     registry_path.write_text(
         json.dumps(
-            {
-                "cases": [
-                    {"case_id": "existing", "vdr_folder": str(existing_vdr)}
-                ]
-            }
+            {"cases": [{"case_id": "existing", "vdr_folder": str(existing_vdr)}]}
         ),
         encoding="utf-8",
     )
@@ -327,51 +395,74 @@ def test_restart_resume_reuses_associated_manifest_and_preview_is_read_only(
     assert factory.call_count == 0
     button_with_label(app, "Continue case preparation").click().run()
 
-    assert any("Upload preview" in item.value for item in app.subheader)
+    assert any("Ingestion preview" in item.value for item in app.subheader)
     assert factory.call_count == 0
     assert load_manifest(new_vdr).model_dump() == before
 
 
-def test_excel_only_streamlit_preparation_exclusion_and_registration(tmp_path,monkeypatch):
+def test_excel_only_streamlit_preparation_exclusion_and_registration(
+    tmp_path, monkeypatch
+):
     from openpyxl import Workbook
-    existing=make_registered_case(tmp_path)
-    registry=tmp_path/'cases.json'
-    registry.write_text(json.dumps({'cases':[{'case_id':'existing','vdr_folder':str(existing)}]}),encoding='utf-8')
-    root=tmp_path/'excel-case'/'VDR';root.mkdir(parents=True)
-    (root/'bad.xlsx').write_bytes(b'corrupt workbook')
-    book=Workbook();book.active.title='Revenue';book.active['A1']='Revenue 2025 100';book.create_sheet('Headcount')['A1']='Headcount 20';book.save(root/'model.xlsx');book.close()
-    client=FakeClient()
-    monkeypatch.setattr(settings,'CASE_REGISTRY_PATH',str(registry))
-    monkeypatch.setattr(settings,'OPENAI_API_KEY','offline-test')
-    monkeypatch.setattr(new_case_ui,'get_openai_client',lambda:client)
-    app=AppTest.from_file('app/main.py').run()
-    button_with_label(app,'Prepare new case').click().run()
-    input_with_label(app,'Local VDR folder').input(str(root))
-    input_with_label(app,'Technical case ID').input('excel-case')
-    app.run();button_with_label(app,'Validate and scan').click().run()
-    button_with_label(app,'Create manifest').click().run()
+
+    existing = make_registered_case(tmp_path)
+    registry = tmp_path / "cases.json"
+    registry.write_text(
+        json.dumps({"cases": [{"case_id": "existing", "vdr_folder": str(existing)}]}),
+        encoding="utf-8",
+    )
+    root = tmp_path / "excel-case" / "VDR"
+    root.mkdir(parents=True)
+    (root / "bad.xlsx").write_bytes(b"corrupt workbook")
+    book = Workbook()
+    book.active.title = "Revenue"
+    book.active["A1"] = "Revenue 2025 100"
+    book.create_sheet("Headcount")["A1"] = "Headcount 20"
+    book.save(root / "model.xlsx")
+    book.close()
+    client = FakeClient()
+    monkeypatch.setattr(settings, "CASE_REGISTRY_PATH", str(registry))
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "offline-test")
+    monkeypatch.setattr(new_case_ui, "get_openai_client", lambda: client)
+    app = AppTest.from_file("app/main.py").run()
+    button_with_label(app, "Prepare new case").click().run()
+    input_with_label(app, "Local VDR folder").input(str(root))
+    input_with_label(app, "Technical case ID").input("excel-case")
+    app.run()
+    button_with_label(app, "Validate and scan").click().run()
+    button_with_label(app, "Create manifest").click().run()
     assert not app.exception
     assert not client.vector_stores.retrieve_calls
-    assert not any(widget.label=='OpenAI vector-store ID' for widget in app.text_input)
-    app.button(key='excel_prepare_0').click().run()
-    assert load_manifest(root).files[0].excel_preprocessing.status=='failed'
+    assert not any(
+        widget.label == "OpenAI vector-store ID" for widget in app.text_input
+    )
+    app.button(key="excel_prepare_0").click().run()
+    assert load_manifest(root).files[0].excel_preprocessing.status == "failed"
     app.run()
-    app.text_input(key='excel_exclusion_reason_0').input('Deliberately corrupt fixture').run()
-    app.button(key='excel_exclude_0').click().run()
-    app.button(key='excel_prepare_1').click().run()
+    app.text_input(key="excel_exclusion_reason_0").input(
+        "Deliberately corrupt fixture"
+    ).run()
+    app.button(key="excel_exclude_0").click().run()
+    app.button(key="excel_prepare_1").click().run()
     assert not app.exception
-    manifest=load_manifest(root)
-    assert manifest.files[0].excel_preprocessing.status=='excluded'
-    assert len(manifest.files[1].derived_artifacts)==2
-    button_with_label(app,'Continue to vector-store association').click().run()
-    input_with_label(app,'OpenAI vector-store ID').input('vs_excel')
-    app.run();button_with_label(app,'Validate and associate').click().run()
-    button_with_label(app,'Continue case preparation').click().run()
-    button_with_label(app,'Upload and index all eligible files').click().run()
+    manifest = load_manifest(root)
+    assert manifest.files[0].excel_preprocessing.status == "excluded"
+    assert len(manifest.files[1].derived_artifacts) == 2
+    button_with_label(app, "Continue to vector-store association").click().run()
+    input_with_label(app, "OpenAI vector-store ID").input("vs_excel")
+    app.run()
+    button_with_label(app, "Validate and associate").click().run()
+    button_with_label(app, "Continue case preparation").click().run()
+    button_with_label(app, "Continue ingestion").click().run()
     assert not app.exception
-    assert [name for name,_ in client.files.create_calls]==['sheet_001.md','sheet_002.md']
-    button_with_label(app,'Continue to registration').click().run()
-    button_with_label(app,'Register prepared case').click().run()
+    assert [name for name, _ in client.files.create_calls] == [
+        "sheet_001.md",
+        "sheet_002.md",
+    ]
+    button_with_label(app, "Continue to registration").click().run()
+    button_with_label(app, "Register prepared case").click().run()
     assert not app.exception
-    assert load_manifest(root).snapshot_state=='sealed'
-    assert any(c['case_id']=='excel-case' for c in json.loads(registry.read_text())['cases'])
+    assert load_manifest(root).snapshot_state == "sealed"
+    assert any(
+        c["case_id"] == "excel-case" for c in json.loads(registry.read_text())["cases"]
+    )

@@ -20,11 +20,10 @@ from src.ingestion.upload_workflow import (
     run_manifest_upload,
     prepare_manifest_upload,
     DefinitePreRemoteUploadError,
-    SafeRetryAuthorization,
-    retry_candidate_context,
 )
 from src.ingestion.uploader import upload_openai_file, attach_file_and_poll
 from src.ingestion.vector_store_manager import create_vector_store
+from test_ingestion_recovery import fake_client, attachment
 
 
 @pytest.fixture(params=["direct", "worksheet"])
@@ -52,8 +51,8 @@ def owner(root):
     return enumerate_upload_targets(load_manifest(root), root)[0].state_owner
 
 
-def good_attach(*args):
-    return SimpleNamespace(status="completed")
+def good_attach(_client, store, file_id):
+    return attachment(file_id, store)
 
 
 @pytest.mark.parametrize(
@@ -85,7 +84,9 @@ def test_remote_boundaries(candidate, failure):
     attach = Mock(
         side_effect=TimeoutError("poll") if failure == "attach" else None,
         return_value=SimpleNamespace(
-            status="failed" if failure == "index_failed" else "completed"
+            status="failed" if failure == "index_failed" else "completed",
+            id="file_exact",
+            vector_store_id="vs_test",
         ),
     )
     result = run_manifest_upload(
@@ -95,40 +96,27 @@ def test_remote_boundaries(candidate, failure):
     state = owner(candidate)
     if failure == "none":
         assert result.succeeded and state.indexing_status == "completed"
-    elif failure == "pre_remote":
-        assert result.safe_retry_keys == (
-            enumerate_upload_targets(load_manifest(candidate), candidate)[0].key,
-        )
+    elif failure in {"pre_remote", "uncertain", "missing_id", "unusable_id"}:
+        assert state.openai_file_id is None
+        assert result.no_id_retryable_count == 1
+        again = Mock(return_value=SimpleNamespace(id="file_retry"))
         retry = run_manifest_upload(
-            candidate,
-            client_factory=object,
-            upload_file=Mock(return_value=SimpleNamespace(id="file_retry")),
-            attach_file=good_attach,
-            safe_retry_authorization=result.safe_retry_authorization,
+            candidate, client_factory=object, upload_file=again, attach_file=good_attach
         )
-        assert retry.succeeded
-    elif failure in {"uncertain", "missing_id", "unusable_id"}:
-        assert state.upload_status == "uploading" and state.openai_file_id is None
-        assert result.recovery_count == 1
+        assert retry.succeeded and again.call_count == 1
+        assert owner(candidate).upload_attempts == 2
     else:
         assert state.openai_file_id == "file_exact"
         assert state.indexing_status == (
             "failed" if failure == "index_failed" else "in_progress"
         )
         assert result.recovery_details["openai_file_id"] == "file_exact"
-    # Every outcome other than proven local failure must be refused on restart.
-    if failure != "pre_remote":
         again = Mock()
-        run_manifest_upload(
-            candidate,
-            client_factory=object,
-            upload_file=again,
-            attach_file=good_attach,
-            safe_retry_authorization=SafeRetryAuthorization(
-                retry_candidate_context(load_manifest(candidate), candidate),
-                (enumerate_upload_targets(load_manifest(candidate), candidate)[0].key,),
-            ),
+        client = fake_client({"file_exact": "completed"})
+        recovered = run_manifest_upload(
+            candidate, client_factory=lambda: client, upload_file=again
         )
+        assert recovered.succeeded
         again.assert_not_called()
 
 
@@ -144,7 +132,7 @@ def test_checkpoint_failures(candidate, checkpoint):
         return save_manifest(manifest, root)
 
     upload = Mock(return_value=SimpleNamespace(id="file_returned"))
-    attach = Mock(return_value=SimpleNamespace(status="completed"))
+    attach = Mock(side_effect=good_attach)
     result = run_manifest_upload(
         candidate,
         client_factory=object,
@@ -163,10 +151,11 @@ def test_checkpoint_failures(candidate, checkpoint):
                 0
             ].key.artifact_id
         )
+    client = fake_client()
     run_manifest_upload(
-        candidate, client_factory=object, upload_file=upload, attach_file=attach
+        candidate, client_factory=lambda: client, upload_file=upload, attach_file=attach
     )
-    assert upload.call_count == 1
+    assert upload.call_count == (2 if checkpoint == 2 else 1)
 
 
 @pytest.mark.parametrize(
@@ -212,7 +201,8 @@ def test_callback_isolation(candidate, stage):
 
 @pytest.mark.parametrize("kind", ["file", "attachment", "store"])
 @pytest.mark.parametrize("failure", ["timeout", "server_error"])
-def test_sdk_mutation_transport_has_no_opaque_retry(tmp_path, kind, failure):
+def test_sdk_operation_specific_retry_counts(tmp_path, kind, failure, monkeypatch):
+    monkeypatch.setattr("openai._base_client.time.sleep", lambda _: None)
     requests = []
 
     def transport(request):
@@ -241,7 +231,8 @@ def test_sdk_mutation_transport_has_no_opaque_retry(tmp_path, kind, failure):
             else:
                 create_vector_store(client, "Offline test")
         assert client.max_retries == 3
-    assert len(requests) == 1 and requests[0].method == "POST"
+    assert len(requests) == (3 if kind == "file" else 1)
+    assert all(request.method == "POST" for request in requests)
 
 
 def test_local_open_failure_is_proven_before_sdk_call(tmp_path):
@@ -251,8 +242,12 @@ def test_local_open_failure_is_proven_before_sdk_call(tmp_path):
     client.files.create.assert_not_called()
 
 
-@pytest.mark.parametrize("headcount_outcome", ["safe", "uncertain", "known_id"])
-def test_three_worksheet_sibling_isolation(tmp_path, headcount_outcome):
+@pytest.mark.parametrize(
+    "middle_outcome", ["local", "uncertain", "known_id", "integrity"]
+)
+def test_three_worksheet_middle_failure_and_recovery_preserve_siblings(
+    tmp_path, middle_outcome
+):
     root = tmp_path / "VDR"
     root.mkdir()
     book = Workbook()
@@ -261,68 +256,78 @@ def test_three_worksheet_sibling_isolation(tmp_path, headcount_outcome):
         book.create_sheet(name)["A1"] = name
     book.save(root / "model.xlsx")
     book.close()
+    raw_before = (root / "model.xlsx").read_bytes()
     create_manifest(build_manifest(str(root)), root)
     preprocess_workbook(root, "model.xlsx")
     m = load_manifest(root)
     m.vector_store_id = "vs_siblings"
     save_manifest(m, root)
+    generated = {
+        p: p.read_bytes()
+        for p in (root.parent / "VDR Assistant" / "derived").rglob("*")
+        if p.is_file()
+    }
+    middle_proxy = next(p for p in generated if p.name == "sheet_002.md")
+    if middle_outcome == "integrity":
+        original = generated[middle_proxy]
+        middle_proxy.write_bytes(b"X" + original[1:])  # Same size, wrong SHA-256.
+    upload_calls = []
 
     def upload(_client, path):
-        if path.name == "sheet_003.md":
-            if headcount_outcome == "safe":
+        upload_calls.append(path.name)
+        if path.name == "sheet_002.md":
+            if middle_outcome == "local":
                 raise DefinitePreRemoteUploadError("not sent")
-            if headcount_outcome == "uncertain":
+            if middle_outcome == "uncertain":
                 raise TimeoutError("uncertain upload")
-            return SimpleNamespace(id="file_headcount")
+            return SimpleNamespace(id="file_customers")
         return SimpleNamespace(id="file_" + path.stem)
 
-    def attach(_client, _store, file_id):
-        if file_id == "file_headcount":
+    def attach(client, store, file_id):
+        if file_id == "file_customers":
             raise TimeoutError("known ID incomplete")
-        return good_attach()
+        return good_attach(client, store, file_id)
 
     result = run_manifest_upload(
         root, client_factory=object, upload_file=upload, attach_file=attach
     )
-    before = [
-        a.model_dump() for a in load_manifest(root).files[0].derived_artifacts[:2]
-    ]
-    if headcount_outcome != "safe":
-        retried = Mock()
-        child = enumerate_upload_targets(load_manifest(root), root)[2]
-        run_manifest_upload(
-            root,
-            client_factory=object,
-            upload_file=retried,
-            attach_file=good_attach,
-            safe_retry_authorization=SafeRetryAuthorization(
-                retry_candidate_context(load_manifest(root), root), (child.key,)
-            ),
+    assert result.pass_outcome == "finished" and result.completed_count == 2
+    if middle_outcome == "integrity":
+        assert upload_calls == ["sheet_001.md", "sheet_003.md"]
+        assert (
+            "integrity" in load_manifest(root).files[0].derived_artifacts[1].last_error
         )
-        retried.assert_not_called()
-        assert [
-            a.model_dump() for a in load_manifest(root).files[0].derived_artifacts[:2]
-        ] == before
-        return
-    assert len(result.safe_retry_keys) == 1 and result.safe_retry_keys[0].artifact_id
-    # A parent path is not authorization for a failed child.
-    assert not prepare_manifest_upload(
-        root, safe_retry_authorization=SafeRetryAuthorization(
-            result.safe_retry_authorization.context, (UploadTargetKey("model.xlsx"),)
-        )
-    ).candidates
-    retried = Mock(return_value=SimpleNamespace(id="file_headcount"))
-    run_manifest_upload(
+        middle_proxy.write_bytes(generated[middle_proxy])
+    children = load_manifest(root).files[0].derived_artifacts
+    before = [children[i].model_dump() for i in [0, 2]]
+    assert all(children[i].indexing_status == "completed" for i in [0, 2])
+    plan = prepare_manifest_upload(root)
+    selected = (
+        plan.recovery_candidates if middle_outcome == "known_id" else plan.candidates
+    )
+    assert len(selected) == 1 and selected[0].key.artifact_id == children[1].artifact_id
+    assert all(
+        c.key.artifact_id for c in selected
+    )  # Workbook parents never become candidates.
+    retried = Mock(return_value=SimpleNamespace(id="file_customers"))
+    client = fake_client({"file_customers": "completed"})
+    recovered = run_manifest_upload(
         root,
-        client_factory=object,
+        client_factory=lambda: client,
         upload_file=retried,
         attach_file=good_attach,
-        safe_retry_authorization=result.safe_retry_authorization,
     )
-    assert retried.call_count == 1 and retried.call_args.args[1].name == "sheet_003.md"
-    assert [
-        a.model_dump() for a in load_manifest(root).files[0].derived_artifacts[:2]
-    ] == before
+    assert recovered.succeeded
+    if middle_outcome == "known_id":
+        retried.assert_not_called()
+    else:
+        assert (
+            retried.call_count == 1 and retried.call_args.args[1].name == "sheet_002.md"
+        )
+    children = load_manifest(root).files[0].derived_artifacts
+    assert [children[i].model_dump() for i in [0, 2]] == before
+    assert (root / "model.xlsx").read_bytes() == raw_before
+    assert all(p.read_bytes() == content for p, content in generated.items())
 
 
 def test_sdk_initial_poll_deadline_never_reattaches(monkeypatch):
@@ -357,8 +362,10 @@ def test_sdk_initial_poll_deadline_never_reattaches(monkeypatch):
         base_url="https://offline.invalid/v1",
         http_client=httpx.Client(transport=httpx.MockTransport(transport)),
     ) as client:
-        with pytest.raises(TimeoutError):
-            attach_file_and_poll(client, "vs_test", "file_test", max_wait_seconds=2)
+        result = attach_file_and_poll(
+            client, "vs_test", "file_test", max_wait_seconds=2
+        )
+        assert result.status == "in_progress"
     assert [r.method for r in requests] == ["POST", "GET"]
 
 
@@ -392,11 +399,12 @@ def test_transient_local_lock_after_file_create_never_reuploads(candidate, monke
     )
 
 
-@pytest.mark.parametrize('extension',['.xlsx','.xls'])
-def test_uploader_never_accepts_raw_workbooks(tmp_path,extension):
-    path=tmp_path/('raw'+extension);path.write_bytes(b'fixture')
-    client=Mock()
-    with pytest.raises(DefinitePreRemoteUploadError,match='Raw workbooks'):
-        upload_openai_file(client,path)
+@pytest.mark.parametrize("extension", [".xlsx", ".xls"])
+def test_uploader_never_accepts_raw_workbooks(tmp_path, extension):
+    path = tmp_path / ("raw" + extension)
+    path.write_bytes(b"fixture")
+    client = Mock()
+    with pytest.raises(DefinitePreRemoteUploadError, match="Raw workbooks"):
+        upload_openai_file(client, path)
     client.files.create.assert_not_called()
-    assert path.read_bytes()==b'fixture'
+    assert path.read_bytes() == b"fixture"

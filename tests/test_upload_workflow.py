@@ -43,116 +43,27 @@ def record(
     )
 
 
+@pytest.mark.parametrize("upload", ["not_uploaded", "uploading", "failed", "uploaded"])
 @pytest.mark.parametrize(
-    ("item", "safe_retry", "disposition", "eligible"),
-    [
-        (record(), False, UploadDisposition.INITIAL_CANDIDATE, True),
-        (
-            record(
-                openai_file_id="file_done",
-                upload_status="uploaded",
-                indexing_status="completed",
-            ),
-            False,
-            UploadDisposition.COMPLETED,
-            False,
-        ),
-        (
-            record(classification_status="unsupported"),
-            False,
-            UploadDisposition.UNSUPPORTED,
-            False,
-        ),
-        (
-            record(classification_status="ignored"),
-            False,
-            UploadDisposition.IGNORED,
-            False,
-        ),
-        (
-            record(classification_status="error"),
-            False,
-            UploadDisposition.CLASSIFICATION_ERROR,
-            False,
-        ),
-        (
-            record(upload_status="uploading"),
-            False,
-            UploadDisposition.UNCERTAIN,
-            False,
-        ),
-        (
-            record(upload_status="uploaded"),
-            False,
-            UploadDisposition.INCONSISTENT,
-            False,
-        ),
-        (
-            record(
-                openai_file_id="file_partial",
-                upload_status="uploaded",
-                indexing_status="not_started",
-            ),
-            False,
-            UploadDisposition.RECOVERY_ONLY,
-            False,
-        ),
-        (
-            record(
-                openai_file_id="file_partial",
-                upload_status="uploaded",
-                indexing_status="in_progress",
-            ),
-            False,
-            UploadDisposition.RECOVERY_ONLY,
-            False,
-        ),
-        (
-            record(
-                openai_file_id="file_partial",
-                upload_status="uploaded",
-                indexing_status="failed",
-            ),
-            False,
-            UploadDisposition.RECOVERY_ONLY,
-            False,
-        ),
-        (
-            record(
-                openai_file_id="file_bad",
-                upload_status="not_uploaded",
-            ),
-            False,
-            UploadDisposition.INCONSISTENT,
-            False,
-        ),
-        (
-            record(upload_status="failed"),
-            False,
-            UploadDisposition.RECOVERY_ONLY,
-            False,
-        ),
-        (
-            record(upload_status="failed"),
-            True,
-            UploadDisposition.SAFE_RETRY,
-            True,
-        ),
-    ],
+    "indexing", ["not_started", "in_progress", "failed", "completed"]
 )
-def test_conservative_record_classification(
-    item,
-    safe_retry: bool,
-    disposition: UploadDisposition,
-    eligible: bool,
-) -> None:
-    classification = classify_manifest_record(
-        item,
-        known_safe_retry=safe_retry,
+@pytest.mark.parametrize("file_id", [None, "file_known", " "])
+def test_manifest_states_define_eligibility(upload, indexing, file_id):
+    item = record(
+        upload_status=upload, indexing_status=indexing, openai_file_id=file_id
     )
-
-    assert classification.disposition == disposition
-    assert classification.eligible is eligible
+    classification = classify_manifest_record(item)
+    assert classification.eligible is (
+        file_id is None and indexing == "not_started" and upload != "uploaded"
+    )
+    if file_id is not None:
+        assert not classification.eligible
+    if file_id == "file_known" and upload == "uploaded":
+        assert classification.disposition == (
+            UploadDisposition.COMPLETED
+            if indexing == "completed"
+            else UploadDisposition.RECOVERY_ONLY
+        )
 
 
 def make_case(tmp_path: Path, filenames=("z.pdf", "Nested/a.pdf")) -> Path:
@@ -195,8 +106,8 @@ def test_preparation_reports_every_preflight_blocker(tmp_path: Path) -> None:
     attempted = [row for row in plan.rows if row.eligible]
     assert len(attempted) == 2
     assert all(row.preflight_ok is False for row in attempted)
-    assert len(plan.blockers) == 2
-    assert not plan.can_execute
+    assert not plan.blockers
+    assert plan.can_execute
 
 
 @pytest.mark.parametrize("relative_path", ["../outside.pdf", "C:/absolute.pdf"])
@@ -208,10 +119,13 @@ def test_preparation_blocks_unsafe_stored_paths(
     manifest = load_manifest(vdr_folder)
     manifest.files[0].relative_path = relative_path
     from pydantic import ValidationError
+
     with pytest.raises(ValidationError):
-        save_manifest(manifest,vdr_folder)
+        save_manifest(manifest, vdr_folder)
     # Externally corrupted manifests fail closed at loading, before planning.
-    (vdr_folder.parent/'VDR Assistant'/'manifest.json').write_text(manifest.model_dump_json(),encoding='utf-8')
+    (vdr_folder.parent / "VDR Assistant" / "manifest.json").write_text(
+        manifest.model_dump_json(), encoding="utf-8"
+    )
     with pytest.raises(UploadPreparationError):
         prepare_manifest_upload(vdr_folder)
 
@@ -229,10 +143,8 @@ def test_preparation_blocks_unreadable_file(tmp_path: Path, monkeypatch) -> None
 
     plan = prepare_manifest_upload(vdr_folder)
 
-    assert plan.blockers == (
-        "document.pdf: The reviewed file is not locally readable.",
-    )
-    assert "sensitive raw error" not in plan.blockers[0]
+    assert not plan.blockers
+    assert plan.rows[0].blocking_reason == "The reviewed file is not locally readable."
 
 
 def test_preparation_requires_owned_manifest_and_vector_store(tmp_path: Path) -> None:
@@ -244,14 +156,18 @@ def test_preparation_requires_owned_manifest_and_vector_store(tmp_path: Path) ->
     blank = make_case(tmp_path / "blank", ("document.pdf",))
     manifest = load_manifest(blank)
     manifest.vector_store_id = None
-    (blank.parent/"VDR Assistant"/"manifest.json").write_text(manifest.model_dump_json(),encoding="utf-8")
-    with pytest.raises(UploadPreparationError, match="vector-store ID"):
+    (blank.parent / "VDR Assistant" / "manifest.json").write_text(
+        manifest.model_dump_json(), encoding="utf-8"
+    )
+    with pytest.raises(UploadPreparationError, match="vector-store association"):
         prepare_manifest_upload(blank)
 
     mismatch = make_case(tmp_path / "mismatch", ("document.pdf",))
     manifest = load_manifest(mismatch)
     manifest.root_path = str((tmp_path / "other" / "VDR").resolve())
-    (mismatch.parent/"VDR Assistant"/"manifest.json").write_text(manifest.model_dump_json(),encoding="utf-8")
+    (mismatch.parent / "VDR Assistant" / "manifest.json").write_text(
+        manifest.model_dump_json(), encoding="utf-8"
+    )
     with pytest.raises(UploadPreparationError, match="does not belong"):
         prepare_manifest_upload(mismatch)
 
@@ -267,8 +183,8 @@ def test_uncertain_record_is_reported_while_safe_candidate_remains(
 
     plan = prepare_manifest_upload(vdr_folder)
 
-    assert len(plan.candidates) == 1
-    assert plan.count(UploadDisposition.UNCERTAIN) == 1
+    assert len(plan.candidates) == 2
+    assert plan.count(UploadDisposition.RETRY_CANDIDATE) == 1
     assert not plan.blockers
 
 
@@ -280,7 +196,7 @@ def success_attach(_client, vector_store_id: str, file_id: str):
     return SimpleNamespace(
         status="completed",
         vector_store_id=vector_store_id,
-        file_id=file_id,
+        id=file_id,
     )
 
 
@@ -310,7 +226,9 @@ def test_execution_persists_all_checkpoints_before_attachment(
         assert persisted.openai_file_id == file_id
         assert persisted.indexing_status == "in_progress"
         events.append(f"attach:{vector_store_id}:{file_id}")
-        return SimpleNamespace(status="completed")
+        return SimpleNamespace(
+            status="completed", id=file_id, vector_store_id=vector_store_id
+        )
 
     result = run_manifest_upload(
         vdr_folder,
@@ -356,9 +274,10 @@ def test_final_preflight_failure_does_not_construct_client(tmp_path: Path) -> No
 
     result = run_manifest_upload(vdr_folder, client_factory=factory)
 
-    assert result.critically_stopped
+    assert result.pass_outcome == "finished"
+    assert result.no_id_retryable_count == 1
     factory.assert_not_called()
-    assert load_manifest(vdr_folder).files[0].upload_status == "not_uploaded"
+    assert load_manifest(vdr_folder).files[0].upload_status == "failed"
 
 
 def test_definite_pre_remote_failure_continues_later_file(tmp_path: Path) -> None:
@@ -380,15 +299,14 @@ def test_definite_pre_remote_failure_continues_later_file(tmp_path: Path) -> Non
 
     assert calls == ["first.pdf", "second.pdf"]
     assert result.completed_count == 1
-    assert result.safely_retryable_count == 1
-    assert result.safe_retry_keys == (UploadTargetKey("first.pdf"),)
+    assert result.no_id_retryable_count == 1
     persisted = load_manifest(vdr_folder)
     first = next(item for item in persisted.files if item.relative_path == "first.pdf")
     assert first.upload_status == "failed"
     assert first.openai_file_id is None
 
 
-def test_generic_upload_failure_is_uncertain_and_stops_later_files(
+def test_exhausted_upload_failure_continues_later_files(
     tmp_path: Path,
 ) -> None:
     vdr_folder = make_case(tmp_path, ("first.pdf", "second.pdf"))
@@ -401,15 +319,17 @@ def test_generic_upload_failure_is_uncertain_and_stops_later_files(
         attach_file=Mock(),
     )
 
-    assert result.critically_stopped
-    assert result.recovery_count == 1
-    upload.assert_called_once()
+    assert result.pass_outcome == "finished"
+    assert result.no_id_retryable_count == 2
+    assert upload.call_count == 2
     persisted = load_manifest(vdr_folder)
     first = next(item for item in persisted.files if item.relative_path == "first.pdf")
-    second = next(item for item in persisted.files if item.relative_path == "second.pdf")
+    second = next(
+        item for item in persisted.files if item.relative_path == "second.pdf"
+    )
     assert first.upload_status == "uploading"
     assert "raw timeout detail" not in first.last_error
-    assert second.upload_status == "not_uploaded"
+    assert second.upload_status == "uploading"
 
 
 def test_id_persistence_failure_stops_before_attachment_and_returns_exact_id(
@@ -456,10 +376,14 @@ def test_indexing_failure_and_interruption_continue_later_files(
         nonlocal attach_calls
         attach_calls += 1
         if attach_calls == 1:
-            return SimpleNamespace(status="failed")
+            return SimpleNamespace(
+                status="failed", id=_file_id, vector_store_id=_vector_store_id
+            )
         if attach_calls == 2:
             raise TimeoutError("raw polling failure")
-        return SimpleNamespace(status="completed")
+        return SimpleNamespace(
+            status="completed", id=_file_id, vector_store_id=_vector_store_id
+        )
 
     result = run_manifest_upload(
         vdr_folder,
@@ -472,9 +396,7 @@ def test_indexing_failure_and_interruption_continue_later_files(
     assert result.recovery_count == 2
     assert attach_calls == 3
     persisted = load_manifest(vdr_folder)
-    states = {
-        item.relative_path: item.indexing_status for item in persisted.files
-    }
+    states = {item.relative_path: item.indexing_status for item in persisted.files}
     assert states == {
         "first.pdf": "failed",
         "second.pdf": "in_progress",
@@ -498,18 +420,22 @@ def test_manifest_checkpoint_failure_stops_complete_batch(tmp_path: Path) -> Non
     upload.assert_not_called()
 
 
-def test_restart_classification_prevents_duplicate_upload(tmp_path: Path) -> None:
+def test_restart_without_id_allows_one_new_logical_upload(tmp_path):
     vdr_folder = make_case(tmp_path, ("document.pdf",))
     manifest = load_manifest(vdr_folder)
     manifest.files[0].upload_status = "uploading"
+    manifest.files[0].upload_attempts = 2
     save_manifest(manifest, vdr_folder)
-    factory = Mock()
-
-    result = run_manifest_upload(vdr_folder, client_factory=factory)
-
-    factory.assert_not_called()
-    assert not result.succeeded
-    assert result.plan.count(UploadDisposition.UNCERTAIN) == 1
+    upload = Mock(side_effect=success_upload)
+    result = run_manifest_upload(
+        vdr_folder,
+        client_factory=object,
+        upload_file=upload,
+        attach_file=success_attach,
+    )
+    assert result.succeeded
+    upload.assert_called_once()
+    assert load_manifest(vdr_folder).files[0].upload_attempts == 3
 
 
 def test_execution_reloads_and_reclassifies_manifest_before_remote_upload(
@@ -534,5 +460,5 @@ def test_execution_reloads_and_reclassifies_manifest_before_remote_upload(
     )
 
     assert result.critically_stopped
-    assert "changed" in result.message
+    assert "stopped" in result.message
     upload.assert_not_called()

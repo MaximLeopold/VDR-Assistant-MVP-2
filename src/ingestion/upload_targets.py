@@ -1,11 +1,19 @@
-﻿"""Runtime-only direct and worksheet upload targets with exact state ownership."""
+"""Runtime-only direct and worksheet upload targets with exact state ownership."""
 
 from dataclasses import dataclass
 from pathlib import Path
 from src.ingestion.manifest import VDRManifest, VDRFileRecord, WorksheetSearchArtifact
 from src.ingestion.manifest_persistence import derive_manifest_paths
-from src.ingestion.paths import resolve_relative, managed_path
+from src.ingestion.paths import (
+    safe_relative_path,
+    managed_path,
+    validate_disjoint_roots,
+)
 from src.ingestion.excel_preprocessing import file_sha256
+
+
+class UploadTargetIntegrityError(ValueError):
+    """Candidate-wide path or generation identity failure."""
 
 
 @dataclass(frozen=True)
@@ -29,6 +37,7 @@ class UploadTarget:
 
 def enumerate_upload_targets(manifest: VDRManifest, root) -> tuple[UploadTarget, ...]:
     paths = derive_manifest_paths(root)
+    validate_disjoint_roots(paths.vdr_folder, paths.assistant_folder)
     targets = []
     for source in sorted(
         manifest.files, key=lambda f: (f.relative_path.casefold(), f.relative_path)
@@ -39,7 +48,7 @@ def enumerate_upload_targets(manifest: VDRManifest, root) -> tuple[UploadTarget,
                     UploadTargetKey(source.relative_path),
                     source,
                     None,
-                    resolve_relative(paths.vdr_folder, source.relative_path),
+                    paths.vdr_folder / safe_relative_path(source.relative_path),
                     source.relative_path,
                 )
             )
@@ -57,11 +66,8 @@ def enumerate_upload_targets(manifest: VDRManifest, root) -> tuple[UploadTarget,
                         UploadTargetKey(source.relative_path, artifact.artifact_id),
                         source,
                         artifact,
-                        managed_path(
-                            paths.vdr_folder,
-                            paths.assistant_folder,
-                            artifact.proxy_relative_path,
-                        ),
+                        paths.assistant_folder
+                        / safe_relative_path(artifact.proxy_relative_path),
                         f"{source.relative_path} → {artifact.worksheet_name}",
                     )
                 )
@@ -93,7 +99,9 @@ def preflight_target(root, target):
             or artifact.proxy_relative_path != expected
             or "/.attempts/" in artifact.proxy_relative_path
         ):
-            return None, "Artifact is not in its completed generation."
+            raise UploadTargetIntegrityError(
+                "Artifact is not in its completed generation."
+            )
         if not path.is_file():
             return None, "Worksheet proxy is missing or not a regular file."
         if (
@@ -102,5 +110,9 @@ def preflight_target(root, target):
         ):
             return None, "Worksheet proxy integrity check failed."
         return path, None
-    except (OSError, ValueError):
-        return None, "Worksheet proxy is unsafe or unreadable."
+    except ValueError as error:
+        raise UploadTargetIntegrityError(
+            "Worksheet proxy path or generation is unsafe."
+        ) from error
+    except OSError:
+        return None, "Worksheet proxy is unreadable."

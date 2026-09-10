@@ -68,39 +68,39 @@ def main() -> int:
             print(f"- {blocker}", file=sys.stderr)
         return 1
 
-    if not plan.candidates:
-        blocked_states = sum(
-            plan.count(disposition)
-            for disposition in (
-                UploadDisposition.UNCERTAIN,
-                UploadDisposition.RECOVERY_ONLY,
-                UploadDisposition.INCONSISTENT,
-                UploadDisposition.CLASSIFICATION_ERROR,
-            )
-        )
-        if blocked_states:
-            print(
-                "No files are safely eligible. One or more records require "
-                "terminal-assisted recovery.",
-                file=sys.stderr,
-            )
-            return 1
-        print("No supported manifest files require upload.")
-        return 0
+    if not plan.can_execute:
+        from src.ingestion.case_readiness import assess_case_readiness
+
+        print("No eligible ingestion or recovery work remains.")
+        return 0 if assess_case_readiness(vdr_folder).is_ready else 1
 
     print(f"Case name: {plan.case_name}")
     print(f"Files requiring upload: {len(plan.candidates)}")
-    print("\nFILES TO UPLOAD")
-    candidate_keys = {candidate.key for candidate in plan.candidates}
+    print(f"Known files to recover: {len(plan.recovery_candidates)}")
+    print("One operator may ingest this candidate at a time.")
     for row in plan.rows:
-        if row.key in candidate_keys:
-            print(
-                f"- {row.display_label} | {row.size_bytes} bytes | "
-                f"{row.upload_status} | {row.indexing_status}"
-            )
-
-    confirmation = input("\nType UPLOAD to upload and index these files: ").strip()
-    if confirmation != "UPLOAD":
+        print(
+            f"- {row.display_label} | {row.disposition.value} | {row.blocking_reason or ''}"
+        )
+    for number, candidate in enumerate(plan.recovery_candidates, 1):
+        print(f"Known target {number}: {candidate.display_label}")
+    confirmation = input(
+        "Type UPLOAD to continue ingestion, RECOVER to refresh / recover known files, "
+        "or ATTACH <known target number> to attach an existing file after fresh absence checks: "
+    ).strip()
+    recover_only = confirmation == "RECOVER"
+    reattach_keys = ()
+    if confirmation.startswith("ATTACH "):
+        try:
+            number = int(confirmation.split()[1])
+            if number < 1:
+                raise ValueError()
+            reattach_keys = (plan.recovery_candidates[number - 1].key,)
+        except (ValueError, IndexError):
+            print("Invalid known target number. No resources changed.", file=sys.stderr)
+            return 2
+        recover_only = True
+    elif confirmation not in {"UPLOAD", "RECOVER"}:
         print("Upload aborted. No manifest or OpenAI resource was changed.")
         return 2
 
@@ -111,6 +111,9 @@ def main() -> int:
         upload_file=upload_openai_file,
         attach_file=attach_file_and_poll,
         manifest_saver=save_manifest,
+        expected_context=plan.context,
+        recover_only=recover_only,
+        reattach_keys=reattach_keys,
     )
     if result.recovery_details:
         import json
@@ -126,12 +129,19 @@ def main() -> int:
             "rerunning uploads.",
             file=sys.stderr,
         )
+    print(f"Ingestion pass: {result.pass_outcome.title()}. {result.message}")
     print(
-        "Upload workflow finished: "
-        f"{result.completed_count} completed, "
-        f"{result.safely_retryable_count} safely retryable, "
-        f"{result.recovery_count} requiring recovery."
+        f"{result.total_completed_count} completed, "
+        f"{result.no_id_retryable_count} no-ID retryable, "
+        f"{result.new_eligible_count} new eligible, "
+        f"{result.known_pending_count} known-ID pending, "
+        f"{result.known_failed_count} known-ID failed."
     )
+    for item in result.files:
+        if item.can_attach_existing:
+            print(
+                f"Attach existing file is available for: {item.display_label}. The next action repeats all checks."
+            )
     return 0 if result.succeeded else 1
 
 

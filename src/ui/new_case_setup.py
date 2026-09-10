@@ -47,7 +47,6 @@ from src.ingestion.upload_workflow import (
     UploadDisposition,
     UploadPreparationError,
     UploadProgressEvent,
-    SafeRetryAuthorization,
     prepare_manifest_upload,
     run_manifest_upload,
 )
@@ -66,7 +65,6 @@ FOLDER_INPUT_KEY = "setup_folder_input"
 CASE_ID_INPUT_KEY = "setup_case_id_input"
 VECTOR_STORE_INPUT_KEY = "setup_vector_store_input"
 SETUP_UPLOAD_RESULT_KEY = "setup_upload_result"
-SETUP_SAFE_RETRY_KEY = "setup_safe_retry_authorization"
 SETUP_REGISTRATION_RESULT_KEY = "setup_registration_result"
 
 SETUP_KEYS = (
@@ -83,7 +81,6 @@ SETUP_KEYS = (
     CASE_ID_INPUT_KEY,
     VECTOR_STORE_INPUT_KEY,
     SETUP_UPLOAD_RESULT_KEY,
-    SETUP_SAFE_RETRY_KEY,
     SETUP_REGISTRATION_RESULT_KEY,
 )
 
@@ -140,7 +137,6 @@ def _set_setup_candidate(state: MutableMapping, folder: Path, case_id: str) -> N
         state.get(SETUP_FOLDER_KEY) != canonical_folder
         or state.get(SETUP_CASE_ID_KEY) != case_id
     ):
-        state.pop(SETUP_SAFE_RETRY_KEY, None)
         state.pop(SETUP_UPLOAD_RESULT_KEY, None)
     state[SETUP_FOLDER_KEY] = canonical_folder
     state[SETUP_CASE_ID_KEY] = case_id
@@ -570,23 +566,30 @@ def _render_complete(state: MutableMapping) -> None:
 
 def _upload_plan_counts(plan) -> dict[str, int]:
     return {
-        "Eligible": len(plan.candidates),
         "Completed": plan.count(UploadDisposition.COMPLETED),
-        "Safe retry": plan.count(UploadDisposition.SAFE_RETRY),
-        "Uncertain": plan.count(UploadDisposition.UNCERTAIN),
-        "Recovery": plan.count(UploadDisposition.RECOVERY_ONLY),
+        "New eligible": plan.count(UploadDisposition.INITIAL_CANDIDATE),
+        "No-ID retryable": plan.count(UploadDisposition.RETRY_CANDIDATE),
+        "Known-ID pending": sum(
+            r.disposition == UploadDisposition.RECOVERY_ONLY
+            and r.indexing_status != "failed"
+            for r in plan.rows
+        ),
+        "Known-ID failed": sum(
+            r.disposition == UploadDisposition.RECOVERY_ONLY
+            and r.indexing_status == "failed"
+            for r in plan.rows
+        ),
+        "Local target issues": sum(r.preflight_ok is False for r in plan.rows),
         "Inconsistent": plan.count(UploadDisposition.INCONSISTENT),
-        "Unsupported": plan.count(UploadDisposition.UNSUPPORTED),
-        "Ignored": plan.count(UploadDisposition.IGNORED),
+        "Ignored / unsupported": plan.count(UploadDisposition.IGNORED)
+        + plan.count(UploadDisposition.UNSUPPORTED),
     }
 
 
 def _render_upload_plan_metrics(plan) -> None:
-    counts = _upload_plan_counts(plan)
-    first_row = st.columns(4)
-    second_row = st.columns(4)
+    columns = [*st.columns(4), *st.columns(4)]
     for column, (label, value) in zip(
-        [*first_row, *second_row], counts.items(), strict=True
+        columns, _upload_plan_counts(plan).items(), strict=True
     ):
         column.metric(label, value)
 
@@ -608,35 +611,90 @@ def _phase2_progress_callback(progress, status):
     return callback
 
 
+def _run_ingestion_action(state, plan, *, recover_only=False, reattach_keys=()):
+    state[SETUP_ACTION_KEY] = True
+    if validate_settings():
+        state[SETUP_ACTION_KEY] = False
+        st.error("OpenAI API access is not configured.")
+        return
+    progress, status = st.progress(0.0), st.empty()
+    try:
+        result = run_manifest_upload(
+            str(plan.vdr_folder),
+            client_factory=get_openai_client,
+            progress_callback=_phase2_progress_callback(progress, status),
+            expected_context=plan.context,
+            recover_only=recover_only,
+            reattach_keys=reattach_keys,
+        )
+    except Exception:
+        st.error(
+            "Ingestion stopped unexpectedly. Reload the manifest before another action."
+        )
+        return
+    finally:
+        state[SETUP_ACTION_KEY] = False
+    state[SETUP_UPLOAD_RESULT_KEY] = result
+    state[SETUP_STEP_KEY] = "upload_result"
+    st.rerun()
+
+
+def _render_ingestion_actions(state, plan):
+    disabled = bool(plan.blockers) or state.get(SETUP_ACTION_KEY, False)
+    st.caption(
+        "One operator may ingest this candidate at a time. Each action starts one sequential pass."
+    )
+    if plan.candidates or plan.recovery_candidates:
+        if st.button(
+            "Continue ingestion",
+            type="primary",
+            key="confirm_manifest_ingestion",
+            disabled=disabled,
+        ):
+            _run_ingestion_action(state, plan)
+    if plan.recovery_candidates:
+        if st.button(
+            "Refresh / recover known files",
+            key="recover_known_files",
+            disabled=disabled,
+        ):
+            _run_ingestion_action(state, plan, recover_only=True)
+    previous = state.get(SETUP_UPLOAD_RESULT_KEY)
+    if (
+        isinstance(previous, UploadBatchResult)
+        and previous.plan.context == plan.context
+    ):
+        keys = {c.key for c in plan.recovery_candidates}
+        for index, item in enumerate(previous.files):
+            if item.can_attach_existing and item.key in keys:
+                st.write(f"Attachment was absent: {item.display_label}")
+                if st.button(
+                    "Attach existing file",
+                    key=f"attach_existing_{index}",
+                    disabled=disabled,
+                    help="Recheck exact File and store, then attach the persisted File ID once if still absent.",
+                ):
+                    _run_ingestion_action(
+                        state, plan, recover_only=True, reattach_keys=(item.key,)
+                    )
+
+
 def _render_upload_preview(state: MutableMapping) -> None:
     vdr_folder = state.get(SETUP_FOLDER_KEY)
     if not isinstance(vdr_folder, str):
         state[SETUP_STEP_KEY] = "details"
         _set_message(state, "error", "Select the VDR folder again.")
         st.rerun()
-
-    authorization = state.get(SETUP_SAFE_RETRY_KEY)
-    if not isinstance(authorization, SafeRetryAuthorization):
-        authorization = None
     try:
-        plan = prepare_manifest_upload(
-            vdr_folder,
-            safe_retry_authorization=authorization,
-        )
+        plan = prepare_manifest_upload(vdr_folder)
     except UploadPreparationError as error:
         st.error(str(error))
         if st.button("Return to case selection", key="cancel_upload_preparation"):
             _cancel_setup(state)
         return
-
-    if authorization is None or authorization.context != plan.retry_context:
-        state.pop(SETUP_SAFE_RETRY_KEY, None)
-        authorization = None
-
-    st.subheader("Step 5 — Upload preview")
+    st.subheader("Step 5 ? Ingestion preview")
     st.caption(
-        "This preview reloads the fixed Phase 1 manifest and performs only "
-        "local, read-only checks. It does not contact OpenAI or change files."
+        "This preview reloads the manifest and performs local read-only checks. Remote status is checked only when you start ingestion or recovery."
     )
     st.write(f"**Case name:** {plan.case_name}")
     st.write(
@@ -649,94 +707,54 @@ def _render_upload_preview(state: MutableMapping) -> None:
             hide_index=True,
             width="stretch",
         )
-
     st.info(
-        "Ensure the complete VDR folder is locally available. For OneDrive-"
-        "backed folders, use ‘Always keep on this device’. Preflight may "
-        "download cloud-placeholder files so their local readability can be checked."
+        "Ensure the VDR folder is locally available. For OneDrive folders, use ?Always keep on this device?. Preflight may download cloud placeholders."
     )
     for blocker in plan.blockers:
         st.error(blocker)
-
-    recovery_count = sum(
-        plan.count(disposition)
-        for disposition in (
-            UploadDisposition.UNCERTAIN,
-            UploadDisposition.RECOVERY_ONLY,
-            UploadDisposition.INCONSISTENT,
-            UploadDisposition.CLASSIFICATION_ERROR,
-        )
-    )
-    if recovery_count:
+    if any(row.preflight_ok is False for row in plan.rows):
         st.warning(
-            "Some records require inspection or candidate rebuild. Safe candidates "
-            "may still be uploaded, but readiness and registration remain blocked."
+            "Local target issues will be recorded individually; ingestion can continue for other targets."
         )
-
+    if plan.count(UploadDisposition.RETRY_CANDIDATE):
+        st.info(
+            "Targets without a saved File ID can be tried again in this pass. An earlier upload may remain as an unused remote File."
+        )
+    _render_ingestion_actions(state, plan)
     readiness = assess_case_readiness(vdr_folder)
-    if not plan.candidates:
-        if readiness.is_ready:
-            if st.button(
-                "Continue to registration",
-                type="primary",
-                key="ready_without_upload",
-            ):
-                state[SETUP_STEP_KEY] = "registration_ready"
-                st.rerun()
-        else:
-            st.warning("No files are safely eligible for automatic upload.")
-        if st.button("Return to case selection", key="leave_empty_upload_plan"):
-            _cancel_setup(state)
-        return
-
-    upload_clicked = st.button(
-        "Upload and index all eligible files",
-        type="primary",
-        key="confirm_manifest_ingestion",
-        disabled=bool(plan.blockers) or state.get(SETUP_ACTION_KEY, False),
-        help="This is the explicit ingestion confirmation.",
-    )
-    if not upload_clicked:
-        return
-
-    state[SETUP_ACTION_KEY] = True
-    missing_settings = validate_settings()
-    if missing_settings:
-        state[SETUP_ACTION_KEY] = False
-        st.error("OpenAI API access is not configured.")
-        return
-
-    progress = st.progress(0.0)
-    status = st.empty()
-    try:
-        result = run_manifest_upload(
-            vdr_folder,
-            client_factory=get_openai_client,
-            progress_callback=_phase2_progress_callback(progress, status),
-            safe_retry_authorization=authorization,
+    if readiness.is_ready:
+        if st.button(
+            "Continue to registration", type="primary", key="ready_without_upload"
+        ):
+            state[SETUP_STEP_KEY] = "registration_ready"
+            st.rerun()
+    elif not plan.can_execute:
+        st.warning(
+            "The case is not ready for registration. Resolve candidate issues before continuing."
         )
-    except Exception:
-        state[SETUP_ACTION_KEY] = False
-        st.error("The upload workflow stopped unexpectedly before completion.")
-        st.info("Reload the persisted manifest status before trying another action.")
-        return
-    state[SETUP_UPLOAD_RESULT_KEY] = result
-    state[SETUP_SAFE_RETRY_KEY] = result.safe_retry_authorization
-    state[SETUP_ACTION_KEY] = False
-    state[SETUP_STEP_KEY] = "upload_result"
-    st.rerun()
+    if st.button("Return to case selection", key="leave_empty_upload_plan"):
+        _cancel_setup(state)
 
 
 def _file_id_recovery_message(result: UploadBatchResult) -> str:
-    persisted = (result.recovery_details or {}).get("last_confirmed_persisted_state", {})
+    persisted = (result.recovery_details or {}).get(
+        "last_confirmed_persisted_state", {}
+    )
     if persisted.get("openai_file_id") == result.recovery_file_id:
+        if persisted.get("indexing_status") == "in_progress" and not persisted.get(
+            "last_error"
+        ):
+            return (
+                "The OpenAI file ID is persisted. Indexing is pending; use Refresh / "
+                "recover known files to check it later. Preserve this ID and do not re-upload."
+            )
         return (
             "The OpenAI file ID is persisted, but indexing or its checkpoint needs "
             "inspection. Preserve this ID and do not re-upload the file."
         )
     return (
         "OpenAI returned a file ID, but persistence could not be confirmed. "
-        "Preserve this ID for inspection and do not re-upload the file."
+        "Preserve this diagnostic and resolve the checkpoint failure before another pass. If the manifest still has no ID, a later pass may create an orphan File."
     )
 
 
@@ -748,18 +766,26 @@ def _render_upload_result(state: MutableMapping) -> None:
         st.rerun()
 
     st.subheader("Step 6 — Upload result")
+    st.write(f"**Pass: {result.pass_outcome.title()}**")
     if result.critically_stopped:
         st.error(result.message)
-    elif result.succeeded:
-        st.success(result.message)
+    elif result.pass_outcome == "paused":
+        st.warning(result.message)
     else:
-        st.warning("The safe candidates finished, but the case needs attention.")
-
-    metrics = st.columns(4)
-    metrics[0].metric("Completed", result.completed_count)
-    metrics[1].metric("Safe retry", result.safely_retryable_count)
-    metrics[2].metric("Needs recovery", result.recovery_count)
-    metrics[3].metric("Already complete", result.skipped_completed_count)
+        st.success(result.message)
+    metrics = st.columns(5)
+    for column, (label, value) in zip(
+        metrics,
+        {
+            "Completed": result.total_completed_count,
+            "No-ID retryable": result.no_id_retryable_count,
+            "New eligible": result.new_eligible_count,
+            "Known-ID pending": result.known_pending_count,
+            "Known-ID failed": result.known_failed_count,
+        }.items(),
+        strict=True,
+    ):
+        column.metric(label, value)
 
     if result.files:
         st.dataframe(
@@ -779,19 +805,22 @@ def _render_upload_result(state: MutableMapping) -> None:
         with st.expander("Candidate recovery diagnostics"):
             st.json(result.recovery_details)
             st.info(
-                "Do not re-upload known or uncertain targets. If safe recovery is unavailable, preserve this candidate and create a fresh snapshot at a distinct location."
+                "Known IDs are recovered without re-upload. No-ID targets may be tried in a later pass. Preserve diagnostics for stopped checkpoints."
             )
 
     if result.recovery_file_id is not None:
         with st.expander("OpenAI file-ID recovery information"):
-            st.error(_file_id_recovery_message(result))
+            if result.critically_stopped:
+                st.error(_file_id_recovery_message(result))
+            else:
+                st.info(_file_id_recovery_message(result))
             st.code(result.recovery_file_id, language=None)
 
     readiness = assess_case_readiness(vdr_folder)
     if readiness.is_ready:
         st.success(
             f"Strict readiness passed for all {readiness.supported_count} "
-            "supported documents."
+            "searchable targets."
         )
         if st.button(
             "Continue to registration",
@@ -804,10 +833,15 @@ def _render_upload_result(state: MutableMapping) -> None:
         st.warning("The case is not ready for registration.")
         for reason in readiness.blocking_reasons:
             st.write(f"- {reason}")
-        label = (
-            "Review safe retry" if result.safe_retry_keys else "Reload upload status"
-        )
-        if st.button(label, key="review_upload_again"):
+        try:
+            plan = prepare_manifest_upload(vdr_folder)
+        except UploadPreparationError as error:
+            st.error(str(error))
+        else:
+            for blocker in plan.blockers:
+                st.error(blocker)
+            _render_ingestion_actions(state, plan)
+        if st.button("Review local manifest", key="review_upload_again"):
             state[SETUP_STEP_KEY] = "upload_preview"
             st.rerun()
 

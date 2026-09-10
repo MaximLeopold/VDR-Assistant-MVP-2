@@ -70,7 +70,11 @@ def test_eligibility_selects_only_supported_records_without_id() -> None:
         )
     manifest = SimpleNamespace(files=records)
 
-    assert [record for record in manifest.files if script.classify_manifest_record(record).eligible] == [records[0]]
+    assert [
+        record
+        for record in manifest.files
+        if script.classify_manifest_record(record).eligible
+    ] == [records[0]]
 
 
 def test_no_eligible_records_skips_confirmation_save_and_client(
@@ -152,7 +156,13 @@ def test_preflight_rejects_invalid_paths(
         size_bytes=999,
     )
 
-    path, reason = script.preflight_manifest_record(root,record)
+    if relative_path in {"../outside.pdf", "C:/absolute.pdf"}:
+        from src.ingestion.upload_targets import UploadTargetIntegrityError
+
+        with pytest.raises(UploadTargetIntegrityError, match="(?i)" + message):
+            script.preflight_manifest_record(root, record)
+        return
+    path, reason = script.preflight_manifest_record(root, record)
     assert path is None
     assert message in reason.lower()
 
@@ -169,7 +179,10 @@ def test_preflight_ignores_persisted_absolute_path(tmp_path: Path) -> None:
         size_bytes=4,
     )
 
-    assert script.preflight_manifest_record(root, record) == (local_path.resolve(), None)
+    assert script.preflight_manifest_record(root, record) == (
+        local_path.resolve(),
+        None,
+    )
 
 
 def configure_success(monkeypatch, events: list[str]):
@@ -186,7 +199,12 @@ def configure_success(monkeypatch, events: list[str]):
 
     def attach(received_client, vector_store_id, file_id):
         events.append(f"attach:{file_id}")
-        return SimpleNamespace(status="completed", last_error=None)
+        return SimpleNamespace(
+            status="completed",
+            last_error=None,
+            id=file_id,
+            vector_store_id=vector_store_id,
+        )
 
     monkeypatch.setattr(script, "upload_openai_file", upload)
     monkeypatch.setattr(script, "attach_file_and_poll", attach)
@@ -257,7 +275,7 @@ def test_generic_upload_failure_is_persisted_as_uncertain_without_retry(
     assert persisted.upload_status == "uploading"
     assert persisted.indexing_status == "not_started"
     assert persisted.upload_attempts == 1
-    assert "uncertain" in persisted.last_error
+    assert "ingestion stopped" in persisted.last_error
     assert "synthetic upload failure" not in persisted.last_error
     upload.assert_called_once()
     attach.assert_not_called()
@@ -287,7 +305,7 @@ def test_attachment_exception_preserves_id_and_in_progress_recovery_state(
     assert persisted.openai_file_id == "file_uploaded"
     assert persisted.upload_status == "uploaded"
     assert persisted.indexing_status == "in_progress"
-    assert "requires recovery" in persisted.last_error
+    assert "ingestion stopped" in persisted.last_error
 
 
 @pytest.mark.parametrize("remote_status", ["failed", "cancelled"])
@@ -309,6 +327,8 @@ def test_remote_terminal_failure_statuses_map_to_indexing_failed(
         "attach_file_and_poll",
         lambda *args: SimpleNamespace(
             status=remote_status,
+            id="file_uploaded",
+            vector_store_id="vs_manifest",
             last_error=SimpleNamespace(
                 code="processing_error",
                 message="synthetic remote failure",
@@ -368,9 +388,7 @@ def test_in_progress_save_failure_stops_before_attachment_and_later_files(
     vdr_folder = make_case(tmp_path, ("first.pdf", "second.pdf"))
     client = Mock()
     upload = Mock(
-        side_effect=lambda client, path: SimpleNamespace(
-            id=f"file_{path.stem}"
-        )
+        side_effect=lambda client, path: SimpleNamespace(id=f"file_{path.stem}")
     )
     attach = Mock(return_value=SimpleNamespace(status="completed"))
     monkeypatch.setattr(script, "get_openai_client", lambda: client)
@@ -419,3 +437,32 @@ def test_multiple_files_are_processed_sequentially(
         "upload:second.pdf",
         "attach:file_second",
     ]
+
+
+@pytest.mark.parametrize("action", ["RECOVER", "ATTACH 1"])
+def test_cli_recovers_known_ids_without_creating_files(
+    tmp_path, monkeypatch, action, capsys
+):
+    from test_ingestion_recovery import fake_client
+
+    root = make_case(tmp_path, ("a.pdf", "b.pdf"))
+    manifest = load_manifest(root)
+    record = manifest.files[0]
+    record.openai_file_id = "file_known"
+    record.upload_status = "uploaded"
+    record.indexing_status = "in_progress"
+    record.upload_attempts = 1
+    save_manifest(manifest, root)
+    client = fake_client({"file_known": "completed"} if action == "RECOVER" else {})
+    upload = Mock(side_effect=AssertionError("Recovery must not create Files"))
+    monkeypatch.setattr(script, "get_openai_client", lambda: client)
+    monkeypatch.setattr(script, "upload_openai_file", upload)
+    provide_inputs(monkeypatch, str(root), action)
+    assert script.main() == 1  # The second, untouched target still blocks readiness.
+    assert "Finished" in capsys.readouterr().out
+    upload.assert_not_called()
+    assert load_manifest(root).files[0].indexing_status == "completed"
+    assert load_manifest(root).files[1].upload_attempts == 0
+    assert client.vector_stores.files.create.call_count == int(
+        action.startswith("ATTACH")
+    )

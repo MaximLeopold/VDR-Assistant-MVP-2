@@ -70,7 +70,9 @@ def case(tmp_path, kind="mixed"):
         root,
         client_factory=object,
         upload_file=lambda *_: SimpleNamespace(id=f"file_{next(n)}"),
-        attach_file=lambda *_: SimpleNamespace(status="completed"),
+        attach_file=lambda _client, store, file_id: SimpleNamespace(
+            status="completed", id=file_id, vector_store_id=store
+        ),
     )
     assert result.succeeded, (result.message, result.recovery_details)
     return root
