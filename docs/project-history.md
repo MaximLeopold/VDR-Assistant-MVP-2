@@ -1,6 +1,6 @@
 # Project history
 
-This is a synthesis of the supplied v2–v11 handovers and the separate v8 technical assessment, checked against the accepted implementation. It records why the project changed; current procedures and limitations belong in [project status](project-status.md) and the architecture documents.
+This history synthesizes the supplied v2–v11 handovers and separate v8 technical assessment, checked against the accepted implementation, and records subsequent user-confirmed development milestones grounded in repository evidence. It records why the project changed; current procedures belong in [development](development.md), while current state and limitations belong in [project status](project-status.md) and the architecture documents.
 
 The [source index](archive/handovers/README.md) identifies each original. Historical instructions, model choices, branch names, test totals, and roadmaps are dated evidence, not current operating facts.
 
@@ -67,6 +67,14 @@ The subsequent resilient-ingestion design report proposed durable retry proofs a
 A final correction separated attachment transport timeouts from the short polling scheduling window. V11 records final offline acceptance, full live ingestion completion through known-ID recovery and a later no-ID retry, and successful Excel workbook/worksheet Q&A and citation. Exact acceptance totals live in [project status](project-status.md).
 
 The [resilient-ingestion decision](decisions/resilient-ingestion.md) preserves the central trade-off: protect the searchable corpus while accepting that uncertain remote File creation cannot be made exactly-once by local JSON checkpoints.
+
+## September 11: Codex Skills Workflow reached final reconciliation
+
+The project established six explicitly invoked repo-local skills for design interviews, conversation continuation, read-only architecture inspection, controlled documentation updates, and durable development milestone handovers. The workflow separates inspection and drafting from approved file changes and leaves Git publication and baseline promotion to separately authorized work.
+
+The project owner accepted `grill-me`, `grilling`, `handoff`, `improve-codebase-architecture`, and the documentation skill’s DRAFT/APPLY workflows. Static validation and DRAFT validation of `development-milestone-handoff` were also accepted, with CREATE MODE validation reserved for creation of the final v13 handover.
+
+This brought the tooling milestone to final documentation reconciliation before commit/push and baseline promotion. Product runtime behavior and architecture were unchanged. [Project status](project-status.md) owns the dated acceptance and outstanding finalization work; [development](development.md#repo-local-codex-skills) owns the procedures.
 
 ## Accepted boundaries and future work
 

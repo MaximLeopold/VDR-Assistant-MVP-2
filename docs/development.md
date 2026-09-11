@@ -107,4 +107,49 @@ Do not clear IDs, reset upload state, rewrite sealed manifests, or use legacy re
 
 Shared Team Access is next, followed by SharePoint integration. Their implementation architectures remain TBD and require dedicated options analysis, trade-off evaluation, and explicit design decisions. Current-baseline procedures do not prescribe future implementation choices.
 
-This workflow does not prescribe a particular Codex model, a fixed workflow across Codex desktop, VS Code, and ChatGPT, a hosting platform, automatic task configuration, or a specific skill framework. The development-tool workflow will be finalized separately after skill review and selection.
+This workflow does not prescribe a particular Codex model, hosting platform, automatic task configuration, or fixed sequence across Codex desktop, VS Code, and ChatGPT. The repo-local skills below support explicitly requested development tasks. Project status records the current skills/workflow milestone and its validation progress.
+
+## Repo-local Codex skills
+
+`.agents/` contains development/Codex tooling only. It is not part of the VDR application runtime and does not change application configuration or behavior.
+
+The currently installed skills are:
+
+| Skill | Purpose and boundary |
+| --- | --- |
+| `grill-me` | Minimal explicit wrapper that reads and follows the installed `grilling` procedure. Invocation alone does not authorize repository edits. |
+| `grilling` | Design interview procedure that establishes shared understanding before action. |
+| `handoff` | Produces a continuation document in the operating system’s temporary directory when requested. It does not finalize a development milestone. |
+| `improve-codebase-architecture` | VDR-specific, read-only architecture inspection. Returns its report in the conversation and does not implement recommendations. |
+| `update-project-documentation` | VDR-specific documentation workflow: read-only DRAFT → human review → explicit approval → scoped APPLY → validation → STOP. |
+| `development-milestone-handoff` | Durable milestone handover for future development sessions: read-only DRAFT → human review → explicit approval of content, version, filename, and exact destination → create one approved file → validation → STOP. |
+
+All six skills set `policy.allow_implicit_invocation: false` in their respective `agents/openai.yaml` files. Request the intended skill explicitly. An explicitly invoked wrapper may load its required dependency; `grill-me` reads `.agents/skills/grilling/SKILL.md`, relative to the repository root.
+
+Detailed instructions remain in each skill’s `SKILL.md`. The three upstream-derived skills were sourced from `mattpocock/skills` at commit `3cca18b368ae95cdbdebbff572ccafa662551015`. `grilling` and `handoff` retain their upstream content. `grill-me` replaces only the dependency instruction with a Codex-compatible file reference and invocation boundary.
+
+### Documentation review and application
+
+`update-project-documentation` starts in DRAFT MODE. It inspects the accepted implementation and maintained documentation, returns concrete proposed changes in the conversation, and stops without creating or modifying files.
+
+APPLY MODE requires an explicit instruction to apply the reviewed changes. Before editing, recheck the draft’s branch, HEAD, relevant implementation, and documentation basis. Apply only the approved files and content, validate the diff, and stop.
+
+Existing decision records must be preserved. A superseding decision requires a separately proposed and explicitly approved new record. `AGENTS.md` changes require separate governance review and cannot be applied through this skill. Source code, tests, application configuration, skills, and historical archives are outside its edit scope.
+
+The documentation skill does not finalize a milestone or create its handoff. These skills do not authorize staging, committing, pushing, merging, or changing branches.
+
+### Development milestone handover
+
+`handoff` produces a conversation continuation document in the operating system’s temporary directory. `development-milestone-handoff` produces a durable project milestone record intended to help start future development sessions.
+
+`development-milestone-handoff` starts in read-only DRAFT MODE. It inspects the current repository, maintained documentation, available prior handover structure, and acceptance evidence; returns the complete proposed handover in the conversation; and stops. The draft distinguishes verified repository state, reported results, user-confirmed acceptance, and inference.
+
+CREATE MODE requires explicit approval of the handover content, version, filename, and exact destination path. Before creation, recheck the repository and milestone basis and perform the required privacy/publication review. A materially stale draft must be regenerated or explicitly reconfirmed.
+
+Create exactly one approved Markdown handover file, read it back, compare it with the approved draft, validate applicable links and whitespace, and report its repository/tracking status. Do not modify other files or automatically update maintained documentation or the handover archive/index.
+
+Maintained-documentation reconciliation and milestone-handover creation are separate, explicitly requested workflows. Neither automatically invokes the other or authorizes staging, committing, pushing, merging, changing branches, or starting the next milestone. A handover records the verified milestone and promotion state; creating it does not itself promote the baseline.
+
+The next session should read the handover together with `AGENTS.md` and maintained documentation, verify actual Git state, and resolve differences using the repository’s authority hierarchy. Current validation results and outstanding milestone checks belong in [project status](project-status.md).
+
+Validate tooling changes through content and diff review, metadata checks, and scoped functionality tests. Static validation and runtime testing establish different things; record their actual outcomes and remaining checks in project status.

@@ -1,6 +1,6 @@
 # Project status
 
-Reviewed: 10 September 2026.
+Reviewed: 11 September 2026.
 
 This document owns mutable project state and dated acceptance results. Read the [development guide](development.md), [architecture](architecture/qa-architecture.md), and [history](project-history.md) for procedures, behavior, and rationale.
 
@@ -23,6 +23,33 @@ The accepted implementation commit identifies the product baseline. Later docume
 The acceptance results are recorded in the accepted v11 milestone handover, dated 10 September 2026, sections 16 and 31–37; the branch and commit reflect subsequently verified Git state. The documentation review did not rerun the offline suite, live ingestion, or live Excel Q&A acceptance. These records are not a continuously monitored remote count or a claim that every workbook feature has been live-tested. Handover identifiers and archival status are listed in the [source index](archive/handovers/README.md).
 
 The resilient-ingestion implementation report records an earlier 981-test state. After the attachment-timeout correction and its additional validation, the authoritative final offline suite recorded in v11 was 986 passing tests. Earlier Excel and handover totals describe earlier revisions.
+
+## Codex Skills Workflow — ready for finalization, 11 September 2026
+
+The project owner has accepted the skill results below against the current repository state. The Codex Skills Workflow milestone is ready for final documentation reconciliation before commit/push and promotion to the accepted baseline. This records accepted working-tree content; final milestone closure and baseline promotion remain pending.
+
+Six skills are installed under `.agents/skills/`. This directory contains development/Codex tooling only and is not part of the VDR application runtime. The [development guide](development.md#repo-local-codex-skills) owns the inventory and workflow procedures.
+
+| Skill | Accepted result |
+| --- | --- |
+| `grill-me` | Accepted |
+| `grilling` | Accepted |
+| `handoff` | Accepted |
+| `improve-codebase-architecture` | Accepted |
+| `update-project-documentation` | DRAFT and APPLY workflows accepted |
+| `development-milestone-handoff` | Static validation and DRAFT workflow accepted; CREATE MODE validation remains pending |
+
+These acceptance results were explicitly confirmed by the project owner on 11 September 2026. Earlier checkpoint documentation records verified skill discovery, the `grill-me` dependency-loading path, successful `handoff` invocation, read-only architecture-skill validation, and documentation-skill static/DRAFT validation. This reconciliation does not represent a rerun of those checks.
+
+Remaining finalization work:
+
+- Complete commit/push of `Codex-Skills-Workflow-(In-Development)` and promote the accepted commit to `Accepted-Development-Baseline` under separate authorization.
+- Validate `development-milestone-handoff` CREATE MODE by creating the final v13 handover after baseline promotion.
+- Record the verified promoted/final state in the final handover and any later separately approved documentation/archive housekeeping.
+
+At the reconciliation inspection, branch `Codex-Skills-Workflow-(In-Development)` was at HEAD `aec088421ee60d8e3f444554999106c62ea88cab`. The twelve installed skill files were untracked; `docs/development.md` and `docs/project-status.md` contained unstaged checkpoint edits; nothing was staged. This is the pre-reconciliation inspection state, not a claim about subsequent Git state.
+
+The accepted product implementation, dated product acceptance results, and product roadmap remain unchanged. No application regression suite or live OpenAI acceptance was rerun during this documentation reconciliation.
 
 ## Accepted behavior
 
