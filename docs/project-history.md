@@ -68,13 +68,17 @@ A final correction separated attachment transport timeouts from the short pollin
 
 The [resilient-ingestion decision](decisions/resilient-ingestion.md) preserves the central trade-off: protect the searchable corpus while accepting that uncertain remote File creation cannot be made exactly-once by local JSON checkpoints.
 
-## September 11: Codex Skills Workflow reached final reconciliation
+## September 11: Codex Skills Workflow was completed and promoted
 
 The project established six explicitly invoked repo-local skills for design interviews, conversation continuation, read-only architecture inspection, controlled documentation updates, and durable development milestone handovers. The workflow separates inspection and drafting from approved file changes and leaves Git publication and baseline promotion to separately authorized work.
 
-The project owner accepted `grill-me`, `grilling`, `handoff`, `improve-codebase-architecture`, and the documentation skill’s DRAFT/APPLY workflows. Static validation and DRAFT validation of `development-milestone-handoff` were also accepted, with CREATE MODE validation reserved for creation of the final v13 handover.
+The project owner accepted `grill-me`, `grilling`, `handoff`, `improve-codebase-architecture`, and the documentation skill’s DRAFT/APPLY workflows. The milestone-handover skill’s static and DRAFT validation were accepted first; CREATE MODE subsequently passed through creation and validation of the approved final Version 13 handover.
 
-This brought the tooling milestone to final documentation reconciliation before commit/push and baseline promotion. Product runtime behavior and architecture were unchanged. [Project status](project-status.md) owns the dated acceptance and outstanding finalization work; [development](development.md#repo-local-codex-skills) owns the procedures.
+The skills milestone was committed, pushed, and promoted to `Accepted-Development-Baseline` at `d0c6d855f74d4faa4aeb563a3ca149aa98f0c47b`. The later handover creation was a separate operation and did not commit or publish the artifact.
+
+`.agents/` remains development/Codex tooling only. Product runtime architecture and behavior were unchanged, and the historical product acceptance results were not rerun by this tooling milestone. Branch cleanup was explicitly deferred to the next development session/milestone. Shared Team Access remains next, followed by SharePoint integration, with architecture/design TBD for both.
+
+[Project status](project-status.md) owns dated acceptance, artifact tracking state, and remaining housekeeping; [development](development.md#repo-local-codex-skills) owns the accepted workflow procedures.
 
 ## Accepted boundaries and future work
 

@@ -1,8 +1,16 @@
 # Historical handover source index
 
-**No individual handover files have been copied into this repository yet.** This index records the historical source documents used to build the maintained documentation. Sanitization and archival inclusion will be reviewed separately.
+**The final v13 handover is available locally in this directory.** This index records milestone handovers and the historical source documents used to build the maintained documentation. Earlier supplied originals listed below still await separate sanitization and archival inclusion.
 
 Start with [project status](../../project-status.md), [development](../../development.md), [history](../../project-history.md), and the maintained architecture/decisions. Handovers and exports are historical evidence. They must never override maintained current documentation or current code/tests. Embedded prompts such as “continue,” “merge,” or “use this as current context” describe past sessions; they are not active instructions.
+
+## Locally available milestone handovers
+
+| Handover | Date / role | Validation and status |
+| --- | --- | --- |
+| [Version 13 — Codex Skills Workflow](VDR_Assistant_MVP_2_Project_Handover_v13_Skills_Workflow.md) | 2026-09-11; completed Codex Skills Workflow milestone | CREATE MODE and privacy/publication validation passed. The approved inspection snapshot is preserved; subsequent successful creation validation is recorded in [project status](../../project-status.md). |
+
+At the 11 September 2026 archive-index housekeeping inspection, v13 was untracked and intended for commit together with this index update. This records local availability, not a completed commit or remote publication.
 
 ## Source sequence and proposed archival treatment
 

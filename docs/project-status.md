@@ -9,6 +9,7 @@ This document owns mutable project state and dated acceptance results. Read the 
 | Item | Accepted state |
 | --- | --- |
 | Development/default baseline | `Accepted-Development-Baseline` |
+| Codex Skills Workflow | Complete; all six repo-local skills accepted, including milestone-handover CREATE MODE |
 | Accepted implementation commit | `d00d26a7cf23d28f47d9bcb1dc9cabed907dbd1c` |
 | Excel Searchable Knowledge | Accepted |
 | Resilient Ingestion & Recovery | Accepted |
@@ -18,15 +19,15 @@ This document owns mutable project state and dated acceptance results. Read the 
 | Next product milestone | **Shared Team Access** — architecture/design TBD |
 | Following milestone | **SharePoint integration** — architecture/design TBD |
 
-The accepted implementation commit identifies the product baseline. Later documentation-only commits may advance repository HEAD without changing this accepted implementation reference.
+The accepted implementation commit identifies the product baseline. Later tooling and documentation commits may advance repository HEAD without changing this accepted implementation reference.
 
 The acceptance results are recorded in the accepted v11 milestone handover, dated 10 September 2026, sections 16 and 31–37; the branch and commit reflect subsequently verified Git state. The documentation review did not rerun the offline suite, live ingestion, or live Excel Q&A acceptance. These records are not a continuously monitored remote count or a claim that every workbook feature has been live-tested. Handover identifiers and archival status are listed in the [source index](archive/handovers/README.md).
 
 The resilient-ingestion implementation report records an earlier 981-test state. After the attachment-timeout correction and its additional validation, the authoritative final offline suite recorded in v11 was 986 passing tests. Earlier Excel and handover totals describe earlier revisions.
 
-## Codex Skills Workflow — ready for finalization, 11 September 2026
+## Codex Skills Workflow — complete, 11 September 2026
 
-The project owner has accepted the skill results below against the current repository state. The Codex Skills Workflow milestone is ready for final documentation reconciliation before commit/push and promotion to the accepted baseline. This records accepted working-tree content; final milestone closure and baseline promotion remain pending.
+The Codex Skills Workflow milestone is complete. Commit `d0c6d855f74d4faa4aeb563a3ca149aa98f0c47b` (`Add Codex skills workflow and development tooling`) was committed, pushed, and promoted to `Accepted-Development-Baseline`. The project owner confirmed final milestone completion on 11 September 2026.
 
 Six skills are installed under `.agents/skills/`. This directory contains development/Codex tooling only and is not part of the VDR application runtime. The [development guide](development.md#repo-local-codex-skills) owns the inventory and workflow procedures.
 
@@ -37,19 +38,19 @@ Six skills are installed under `.agents/skills/`. This directory contains develo
 | `handoff` | Accepted |
 | `improve-codebase-architecture` | Accepted |
 | `update-project-documentation` | DRAFT and APPLY workflows accepted |
-| `development-milestone-handoff` | Static validation and DRAFT workflow accepted; CREATE MODE validation remains pending |
+| `development-milestone-handoff` | Static validation, DRAFT workflow, and CREATE MODE accepted |
 
-These acceptance results were explicitly confirmed by the project owner on 11 September 2026. Earlier checkpoint documentation records verified skill discovery, the `grill-me` dependency-loading path, successful `handoff` invocation, read-only architecture-skill validation, and documentation-skill static/DRAFT validation. This reconciliation does not represent a rerun of those checks.
+Earlier validation records establish skill discovery, the `grill-me` dependency-loading path, successful `handoff` invocation, read-only architecture-skill validation, and documentation-skill validation. These checks were not rerun during this final documentation reconciliation.
 
-Remaining finalization work:
+CREATE MODE passed by creating the approved [Version 13 milestone handover](archive/handovers/VDR_Assistant_MVP_2_Project_Handover_v13_Skills_Workflow.md). The creation report confirmed that readback matched the approved draft exactly, all 14 relative links resolved, whitespace validation found no errors, privacy/publication review found no sensitive content requiring removal, and only the approved handover file was created. No staging, commit, push, merge, branch switch, or archive-index update occurred during creation.
 
-- Complete commit/push of `Codex-Skills-Workflow-(In-Development)` and promote the accepted commit to `Accepted-Development-Baseline` under separate authorization.
-- Validate `development-milestone-handoff` CREATE MODE by creating the final v13 handover after baseline promotion.
-- Record the verified promoted/final state in the final handover and any later separately approved documentation/archive housekeeping.
+The final v13 preserves its approved inspection snapshot, including statements reserving CREATE MODE validation for subsequent creation. The successful creation report and this status update record that subsequent result; the historical handover is not rewritten.
 
-At the reconciliation inspection, branch `Codex-Skills-Workflow-(In-Development)` was at HEAD `aec088421ee60d8e3f444554999106c62ea88cab`. The twelve installed skill files were untracked; `docs/development.md` and `docs/project-status.md` contained unstaged checkpoint edits; nothing was staged. This is the pre-reconciliation inspection state, not a claim about subsequent Git state.
+At the final reconciliation inspection, `Accepted-Development-Baseline` remained at `d0c6d855f74d4faa4aeb563a3ca149aa98f0c47b`, with no tracked changes and nothing staged. The final v13 handover was the sole untracked file. This is a dated inspection state, not a claim that the handover or subsequent documentation changes have been committed or pushed.
 
-The accepted product implementation, dated product acceptance results, and product roadmap remain unchanged. No application regression suite or live OpenAI acceptance was rerun during this documentation reconciliation.
+Branch cleanup remains explicitly deferred to the next development session/milestone. Archive-index housekeeping requires a separate scope; it is not performed by the documentation skill. These follow-ups do not reopen the accepted skills milestone.
+
+Product runtime architecture, behavior, configuration, the accepted product implementation reference, and dated product acceptance results remain unchanged. No application regression suite, manual Streamlit acceptance, or live OpenAI acceptance was rerun for this reconciliation. Shared Team Access remains the next product milestone, followed by SharePoint integration; architecture/design remains TBD for both.
 
 ## Accepted behavior
 
@@ -103,7 +104,7 @@ A bounded read-only end-of-pass recovery sweep remains a separate deferred inges
 
 ## Documentation status and unresolved evidence
 
-The maintained foundation is in place. The [README](../README.md) has been modernized as the public-facing overview. Detailed current behavior remains governed by code/tests, maintained architecture, decision records, and development guidance. The [exports](../exports/) remain supporting historical records. Individual handovers await separate sanitization and archive review.
+The maintained foundation is in place. The [README](../README.md) has been modernized as the public-facing overview. Detailed current behavior remains governed by code/tests, maintained architecture, decision records, and development guidance. The [exports](../exports/) remain supporting historical records. Historical handover originals listed in the source index still await separate sanitization and archival review. The final v13 handover has been created locally and passed its privacy/publication review; its untracked status and the separate archive-index housekeeping are recorded above.
 
 Current implementation facts are grounded in source and tests. Full acceptance is recorded in the accepted v11 milestone handover; the repository does not include a separate live-run transcript. The handover sequence also lacks a complete live acceptance ledger for every intermediate commit.
 
