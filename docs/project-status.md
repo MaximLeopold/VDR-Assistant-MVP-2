@@ -76,7 +76,7 @@ A bounded read-only end-of-pass recovery sweep remains a separate deferred inges
 
 ## Documentation status and unresolved evidence
 
-The maintained foundation is in place. The existing [README](../README.md) remains unchanged and has stale evidence-display, example-path, and recovery details; use the maintained architecture and development guide for those topics. The [exports](../exports/) remain supporting historical records. Individual handovers await separate sanitization and archive review.
+The maintained foundation is in place. The [README](../README.md) has been modernized as the public-facing overview. Detailed current behavior remains governed by code/tests, maintained architecture, decision records, and development guidance. The [exports](../exports/) remain supporting historical records. Individual handovers await separate sanitization and archive review.
 
 Current implementation facts are grounded in source and tests. Full acceptance is recorded in the accepted v11 milestone handover; the repository does not include a separate live-run transcript. The handover sequence also lacks a complete live acceptance ledger for every intermediate commit.
 

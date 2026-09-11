@@ -1,6 +1,6 @@
 # Development guide
 
-Start with [project status](project-status.md) and [AGENTS.md](../AGENTS.md). Use architecture documents for behavior and decision records for rationale. Historical handovers and reports are not executable development instructions.
+Start with [project status](project-status.md) and [AGENTS.md](../AGENTS.md). [README.md](../README.md) provides the public-facing overview and navigation; this guide owns setup, development, and validation procedures. Use architecture documents for behavior and decision records for rationale. Historical handovers and reports are not executable development instructions.
 
 ## Environment and configuration
 
@@ -15,11 +15,11 @@ python -m venv .venv
 
 Configure an ignored local `.env` using [.env.example](../.env.example). [Settings](../src/config/settings.py) load `OPENAI_API_KEY`, `OPENAI_MODEL`, and `CASE_REGISTRY_PATH`. Existing process environment values are not overridden by the default dotenv load. Do not print or commit credentials.
 
-The code and environment example default the model to `gpt-4o`; the old README example and historical live configuration differ. A default/example is not evidence of the local runtime value or a recommendation to change it. Record the actual non-secret model configuration when conducting authorized live acceptance.
+The code and environment example default the model to `gpt-4o`; historical live configuration differs. A default/example is not evidence of the local runtime value or a recommendation to change it. Record the actual non-secret model configuration when conducting authorized live acceptance.
 
 The ignored registry stores only `case_id` and `vdr_folder`. Registry-relative VDR paths resolve from the registry file's directory. The selected manifest owns the case name and vector-store ID. `VECTOR_STORE_ID` and `VDR_FOLDER` settings remain for legacy scripts, not normal case-selected chat.
 
-The example registry is a shape example, not a ready case. Use an actual raw VDR directory outside this application repository, with its sibling `VDR Assistant` directory. Do not adopt the old README's in-repository example path for new-case preparation.
+The example registry is a shape example, not a ready case. Use an actual raw VDR directory outside this application repository, with its sibling `VDR Assistant` directory.
 
 Start the local UI with:
 

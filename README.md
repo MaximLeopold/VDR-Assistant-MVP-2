@@ -1,260 +1,98 @@
 # VDR Assistant MVP 2
 
-VDR Assistant MVP 2 is a local Streamlit application for asking questions against documents indexed in an OpenAI vector store.
+VDR Assistant is a local Streamlit application for asking natural-language questions about Virtual Data Room (VDR) documents in M&A and due diligence. It combines case-based OpenAI File Search with citations and inspectable, source-verified evidence.
 
-The current MVP lists a small set of prepared VDR cases and opens one active
-case at a time. Each prepared case uses its own manifest and OpenAI vector
-store.
+This README is the project entry point. The [maintained documentation](docs/project-status.md) owns detailed current behavior, acceptance records, and development guidance; historical handovers and exports provide supporting evidence.
 
-## Current functionality
+## Current capabilities
 
-- Ask questions about VDR documents
-- Retrieve answers using OpenAI File Search
-- Display source files for supported answers, including VDR folder breadcrumbs
-  when the active case manifest is configured
-- Display concise, source-verified quotations beneath successful answers
-- Expand retrieved File Search passages beneath their cited sources in chat,
-  with an Evidence view and a Raw retrieval audit view
-- Display an optional Structured tab for locally verified key figures,
-  row-oriented evidence tables, and explicit horizontal financial series
-- Return a fallback response when information is not found in the VDR documents
-- Maintain short conversation history for follow-up questions
-- Reset the chat session from the sidebar
-- Select one prepared case when the application starts
-- Close the active case and safely return to case selection
-- Prepare an unregistered new case by scanning a local VDR, creating its
-  manifest, and associating a manually created empty OpenAI vector store
-- Continue a prepared case through sequential document upload, strict
-  readiness checks, and atomic local case registration
+- **Case-based Q&A:** select a prepared case from the local registry, ask questions, and use recent conversation context for follow-ups. Switching cases resets chat state.
+- **Verified supporting evidence:** answers include citations and require at least one verified **Best** excerpt. Quotations are optional; verified Additional context and optional Structured figures/tables may also be shown.
+- **Controlled publication:** prepared cases use Manifest v2. Publication/registration requires 100% readiness of required searchable targets and produces a sealed, frozen snapshot.
 
-Successful main answers are synthesized from cited VDR evidence. A Markdown
-table in the main answer is not automatically verified cell by cell. The UI
-discloses this distinction and separately identifies when independently
-verified source figures are available under Structured.
+## High-level architecture
 
-Each cited source displays up to two retrieved passages, ordered by the
-relevance score returned by File Search. Evidence is the default business-user
-view. A single passage appears directly; when a second passage is available,
-the best-ranked passage is selected first and the second remains available as
-additional retrieved context. Evidence cleans display whitespace, applies only
-conservative soft-wrap reflow, and uses boundary-aware excerpts with a
-1,800-character hard maximum. Ambiguous fragmented or table-like extractions
-remain preformatted and carry a layout notice rather than being reconstructed.
-Raw retrieval preserves the complete exact stored File Search strings for the
-same first two passages as an audit fallback. Scores and internal identifiers
-are not displayed. Table-like content is converted to a table only when it is
-independently verified for Structured; otherwise Structured remains absent.
+Q&A follows **primary answer through OpenAI File Search → combined support selection and verification → optional Structured evidence**. A failed combined support stage or absence of verified Best evidence withholds the provisional answer. Optional Structured processing cannot veto an otherwise supported answer.
 
-Quote candidates are selected from cited retrieved evidence, and every
-displayed quotation is checked locally against the corresponding source text.
-Unverifiable candidates are omitted, and quote selection failure does not
-invalidate an otherwise supported answer. This verification establishes that
-the displayed wording occurs in retrieved evidence; it does not prove the
-broader answer is correct. The sidebar stays citation-only.
-When a retrieved passage supports locally verified key figures, a row-oriented
-table, or explicit horizontal financial series, its evidence expander also
-provides a Structured view. Horizontal series are converted into the existing
-row-oriented verified table only after the category and every value sequence
-have been matched locally to distinct, contiguous source lines. Values and
-financial period or scenario markers, including compact Budget suffix `B`,
-remain exact strings. Ambiguous, interleaved, incomplete, competing, or fully
-flattened horizontal structures are omitted.
-Displayed labels, values, periods, units, headers, and cells remain exact source
-strings. Ambiguous relationships are omitted, and the Structured view does not
-claim to reproduce the original PDF or slide layout. Phase 2 intentionally does
-not reconstruct every source table. No charts are generated yet; future chart
-construction must consume verified tables only.
-Retrieval and ranking tuning remain outside Milestone 1C.
+The release gate is **answer-wide, not claim-level**. One cited source's verified Best can satisfy it; this does not establish verified support for every source or claim. Main-answer tables are not automatically verified cell by cell.
 
-## Fallback behavior
+The original VDR remains the document source of truth. The manifest records snapshot provenance and remote identities; the OpenAI vector store is the searchable index for that prepared snapshot. Normal Q&A uses retrieved text, while opening a case still requires its configured local directory and sealed manifest. See [Q&A architecture](docs/architecture/qa-architecture.md) and the [case/snapshot model](docs/architecture/case-and-snapshot-model.md).
 
-If the answer cannot be supported by retrieved VDR documents, the app returns:
+## Excel searchable knowledge
 
-```text
-I can not find this information in the VDR documents
-```
+`.xlsx` workbooks contribute searchable knowledge through deterministic Markdown artifacts, one per included worksheet, in the same case vector store. Raw workbooks are preprocessing sources and are never directly uploaded through this ingestion path. Citations preserve **Workbook → Worksheet** provenance.
 
-## Local setup
+Artifacts derive from captured workbook bytes and include visible content, stored formula results, and formula text. Hidden content is omitted, with coverage and exclusions available for review. This is bounded searchable knowledge, not unrestricted spreadsheet execution or analysis: formula recalculation, macros, charts/images, legacy `.xls`, and advanced calculations remain outside the accepted milestone. See the [Excel decision](docs/decisions/excel-searchable-knowledge.md).
 
-### 1. Clone the repository
+## Case preparation and ingestion
 
-```powershell
-git clone <repository-url>
-cd VDR-Assistant-MVP-2
-```
+Operators prepare and register cases through the preparation UI. Ingestion and recovery are also available through the [upload/recovery CLI](scripts/upload_new_manifest_files.py). Users of prepared cases select a case and ask questions through the browser.
 
-### 2. Create a virtual environment
+The raw VDR tree stays read-only and outside the application repository; managed artifacts and manifests live in a separate sibling directory. Ingestion is sequential and manifest-driven. A returned File ID is persisted and verified before attachment. Known-ID targets recover by exact ID and never repeat File creation; eligible no-ID targets may retry in later operator-started passes.
+
+Uncertain File creation can leave unattached orphan OpenAI Files. This is an accepted trade-off, without automatic orphan discovery or cleanup. Publication still requires every required searchable target to complete; unsupported/ignored sources and explicitly excluded workbooks are outside that target set, while unresolved errors block readiness.
+
+Read the [ingestion architecture](docs/architecture/ingestion-architecture.md) and [development guide](docs/development.md) before operating ingestion or recovery.
+
+## Recorded acceptance
+
+The accepted Excel Searchable Knowledge and Resilient Ingestion & Recovery milestones are recorded in the **10 September 2026** v11 handover:
+
+- **986 offline tests passed** after the attachment-timeout correction.
+- **86/86 required searchable targets completed** in full-VDR live ingestion acceptance.
+- **Live Excel workbook/worksheet retrieval and citations accepted.**
+
+These are dated milestone results, not continuously rerun guarantees. [Project status](docs/project-status.md) owns the authoritative acceptance record and identifies `Accepted-Development-Baseline` as the accepted product baseline.
+
+## Local setup and run
+
+From the repository root on Windows, create the environment and install [requirements](requirements.txt):
 
 ```powershell
 python -m venv .venv
+& .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-### 3. Activate the virtual environment
+Create an ignored local `.env` using [.env.example](.env.example). Set `OPENAI_API_KEY` locally and review `OPENAI_MODEL` and `CASE_REGISTRY_PATH`. Model/runtime behavior depends on the local environment; examples and historical acceptance do not establish the active configuration.
+
+Use the ignored registry selected by `CASE_REGISTRY_PATH` (default `cases.local.json`). New cases enter it through registration in the preparation workflow. For existing prepared cases, configure technical case IDs and actual external VDR directories with their sibling sealed manifests; relative VDR paths resolve from the registry file's directory. Normal case-selected chat obtains the vector-store ID from the manifest.
+
+Start the application:
 
 ```powershell
-.venv\Scripts\Activate.ps1
+& .\.venv\Scripts\python.exe -m streamlit run app/main.py --server.address 127.0.0.1
 ```
 
-If PowerShell blocks activation, run:
+Select a registered case, or use **Prepare new case** for operator preparation. Q&A, store association, uploads, and remote recovery contact OpenAI; use only explicitly authorized data, resources, and operations. Keep credentials, real VDR material, private paths, resource IDs, and local manifest/registry data out of Git.
 
-```powershell
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-```
+## Current limitations
 
-Then activate the environment again.
+- Shared Team Access, authentication/case authorization, and SharePoint integration are not implemented.
+- One writer per case is an operational assumption, not a technical lock. Atomic local JSON replacement does not provide multi-user transactions.
+- No partial publication or automatic synchronization of registered snapshots; source changes require a fresh snapshot.
+- Claim-level grounding and evidence-formatting/whitespace preservation remain explicitly deferred Q&A issues.
+- Compare and Summarize remain placeholders. Other known limitations and future design candidates are tracked in [project status](docs/project-status.md).
 
-### 4. Install dependencies
+## Roadmap
 
-```powershell
-pip install -r requirements.txt
-```
+1. **Shared Team Access — architecture/design TBD.**
+2. **SharePoint integration — architecture/design TBD.**
 
-### 5. Create a local `.env` file
+The accepted product requirement restricts ingestion and case management to selected authorized operators rather than the whole team. The current local application does not enforce that access boundary. Both milestones require options analysis and explicit design decisions; technologies, deployment, persistence, coordination, and SharePoint's integration role remain open.
 
-Create a file called `.env` in the project root.
+## Documentation
 
-Example:
+| Document | Purpose |
+| --- | --- |
+| [AGENTS.md](AGENTS.md) | Standing development instructions and accepted-baseline safeguards |
+| [Project status](docs/project-status.md) | Current mutable state, acceptance, limitations, and next milestones |
+| [Development guide](docs/development.md) | Setup, operational boundaries, and validation procedures |
+| [Q&A architecture](docs/architecture/qa-architecture.md) | How retrieval, evidence verification, and answer release work |
+| [Ingestion architecture](docs/architecture/ingestion-architecture.md) | How upload, recovery, and readiness work |
+| [Case and snapshot model](docs/architecture/case-and-snapshot-model.md) | How manifests, worksheet provenance, and publication work |
+| [Decision records](docs/decisions/) | Why the accepted architecture was chosen |
+| [Project history](docs/project-history.md) | Evolution, lessons, and rejected or superseded approaches |
 
-```env
-OPENAI_API_KEY=your_openai_api_key_here
-OPENAI_MODEL=gpt-4.1
-CASE_REGISTRY_PATH=cases.local.json
-```
+## Development and testing
 
-`CASE_REGISTRY_PATH` may be absolute or relative to the repository root. The
-real registry is local and ignored by Git. Copy `cases.example.json` to
-`cases.local.json` and configure each prepared case with only a stable
-`case_id` and its local `vdr_folder`:
-
-```json
-{
-  "cases": [
-    {
-      "case_id": "example-case",
-      "vdr_folder": "./prepared-cases/example-case/VDR"
-    }
-  ]
-}
-```
-
-Relative VDR paths are resolved from the registry file. Absolute paths are
-also supported in the ignored local registry. The selected case manifest must
-exist in the VDR folder's sibling `VDR Assistant/manifest.json` and must
-contain a usable case name and vector-store ID. The manifest remains the
-source of truth for case metadata, document mappings, and ingestion state.
-
-The application blocks incomplete prepared cases instead of silently mixing a
-VDR folder, manifest, and vector store. The vector-store ID is not editable in
-normal chat.
-
-Do not commit `.env` to GitHub.
-
-### 6. Run the Streamlit app
-
-```powershell
-streamlit run app/main.py --server.address 127.0.0.1
-```
-
-The app should open in the browser and remain bound to the local machine.
-
-## New-case preparation and ingestion
-
-From the startup case selector, choose **Prepare new case** to:
-
-1. enter an existing local VDR folder and a non-confidential technical case
-   ID;
-2. run and review a read-only file-metadata scan;
-3. explicitly create the local manifest; and
-4. validate and associate an empty vector store that you created manually in
-   the OpenAI Platform;
-5. continue to a read-only upload preview and local preflight;
-6. explicitly upload and index every safely eligible supported document in
-   deterministic, sequential order; and
-7. separately confirm registration after strict readiness passes.
-
-The upload preview makes no OpenAI call and does not change the manifest. Make
-the complete VDR folder locally available before continuing. For a OneDrive-
-backed folder, select **Always keep on this device**; the one-byte readability
-probe may hydrate cloud-placeholder files.
-
-The Phase 1 manifest remains the fixed ingestion plan. Missing, changed, or
-unreadable reviewed files block the planned batch. Restore the reviewed file
-version instead of refreshing or replacing it automatically. A successful
-registration writes only the technical `case_id` and normalized absolute
-`vdr_folder` to the ignored local registry. Restart Streamlit or return to the
-startup selector to open the newly registered case.
-
-### Recovery boundaries
-
-Rare ambiguous outcomes remain terminal-assisted in this MVP:
-
-- reconciliation cannot find an uploaded but unattached OpenAI file;
-- reconciliation cannot safely resolve stale `uploading` records without a
-  persisted OpenAI file ID;
-- an uploaded file with incomplete or interrupted indexing is never
-  re-uploaded automatically;
-- vector-store adoption is not part of the normal preparation UI;
-- manifest refresh does not replace changed files or remove missing files and
-  is not automatic synchronization.
-
-If OpenAI returned a file ID but local ID persistence failed, preserve the ID
-shown in the narrowly scoped recovery view and do not blindly re-upload the
-document.
-
-## Project structure
-
-```text
-VDR-Assistant-MVP-2/
-|-- app/
-|   |-- main.py
-|-- src/
-|   |-- chains/
-|   |-- config/
-|   |-- context/
-|   |-- ingestion/
-|   |-- presentation/
-|   |-- prompts/
-|   |-- retrieval/
-|   |-- schemas/
-|   |-- ui/
-|   |-- validation/
-|-- tests/
-|-- cases.example.json
-|-- .env.example
-|-- .gitignore
-|-- README.md
-|-- requirements.txt
-```
-
-## Notes for team members
-
-The OpenAI vector store is the searchable index used by the application. It is not the original VDR folder.
-
-Each team member needs:
-
-- Access to the GitHub repository
-- A valid OpenAI API key
-- Access to each prepared case's local VDR folder and manifest
-- A local ignored case registry
-- A local `.env` file
-
-## Current scope
-
-Implemented:
-
-- Prepared-case selection with isolated chat state
-- Local Streamlit Q&A workflow
-- OpenAI File Search integration
-- Folder-aware citations and ranked retrieved evidence
-- Verified quotations and structured evidence
-- Manifest-driven ingestion operator scripts
-- Guided new-case ingestion and local registration
-- Reset chat button
-
-Not implemented yet:
-
-- Registered-case document administration or automatic synchronization
-- Compare workflow
-- Summarize workflow
-- User authentication
-- Deployment
+Use the [development guide's network-blocked offline launcher](docs/development.md) with fake credentials and a disposable temporary directory. Choose focused tests for scoped changes; run the full suite when regression risk justifies it. Live acceptance is separately authorized and does not follow automatically from passing offline tests.
